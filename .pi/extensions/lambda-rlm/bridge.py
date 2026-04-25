@@ -15,7 +15,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from rlm import LambdaRLM
+from rlm import LambdaRLM, LambdaPromptRegistry
 from rlm.clients import BaseLM
 from rlm.core.types import ModelUsageSummary, UsageSummary
 
@@ -141,7 +141,10 @@ class ModelCallbackFailure(RuntimeError):
         self.response = response
 
 
-def bridge_request_to_prompt(request: dict[str, Any]) -> tuple[str, str, int]:
+def bridge_request_to_prompt(request: dict[str, Any]) -> tuple[str, str, int, LambdaPromptRegistry | None]:
+    prompt_bundle = request.get("promptBundle") if isinstance(request.get("promptBundle"), dict) else None
+    prompt_registry = LambdaPromptRegistry.from_bridge_bundle(prompt_bundle) if prompt_bundle is not None else None
+
     input_value = request.get("input")
     if not isinstance(input_value, dict):
         raise ValueError("run_request requires input object.")
@@ -157,7 +160,7 @@ def bridge_request_to_prompt(request: dict[str, Any]) -> tuple[str, str, int]:
     lambda_rlm = request.get("lambdaRlm") if isinstance(request.get("lambdaRlm"), dict) else {}
     raw_context_window = lambda_rlm.get("contextWindowChars") if isinstance(lambda_rlm, dict) else None
     context_window = raw_context_window if isinstance(raw_context_window, int) and raw_context_window > 0 else 100_000
-    return prompt, question, context_window
+    return prompt, question, context_window, prompt_registry
 
 
 def main() -> int:
@@ -197,10 +200,10 @@ def main() -> int:
         return 0
 
     try:
-        prompt, question, context_window = bridge_request_to_prompt(request)
+        prompt, question, context_window, prompt_registry = bridge_request_to_prompt(request)
         log(f"bridge: received real Lambda-RLM run request {run_id}")
         client = CallbackBaseLM(run_id)
-        result = LambdaRLM(client=client, query=question, context_window_chars=context_window).completion(prompt)
+        result = LambdaRLM(client=client, query=question, context_window_chars=context_window, prompt_registry=prompt_registry).completion(prompt)
         emit_stdout(
             {
                 "type": "run_result",

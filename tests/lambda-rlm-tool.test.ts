@@ -141,6 +141,83 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
     );
   });
 
+  it("uses a QA prompt overlay in model-visible Lambda-RLM leaf prompts", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "lambda-rlm-qa-overlay-"));
+    await mkdir(join(cwd, ".pi", "lambda-rlm", "prompts", "tasks"), { recursive: true });
+    await writeFile(join(cwd, ".pi", "lambda-rlm", "prompts", "tasks", "qa.md"), "PROJECT QA OVERRIDE\nQuestion: <<query>>\nText: <<text>>", "utf8");
+    const contextPath = join(cwd, "context.txt");
+    await writeFile(contextPath, "The override fact is blue.", "utf8");
+    const prompts: string[] = [];
+
+    const result = await executeLambdaRlmTool(
+      { contextPath: "context.txt", question: "What color is the override fact?" },
+      {
+        cwd,
+        contextWindowChars: 1000,
+        leafProcessRunner: async (invocation) => {
+          const promptFile = invocation.args.at(-1);
+          const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
+          prompts.push(prompt);
+          return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : "blue\n", stderr: "" };
+        },
+      },
+    );
+
+    expect(result.details).toMatchObject({ ok: true, bridgeRun: { childPiLeafCalls: prompts.length } });
+    expect(prompts.some((prompt) => prompt.includes("PROJECT QA OVERRIDE"))).toBe(true);
+    expect(prompts.some((prompt) => prompt.includes("Using the following context, answer"))).toBe(false);
+    expect(JSON.stringify(result.details)).not.toContain("PROJECT QA OVERRIDE");
+    expect(result.details).toMatchObject({ bridgeRun: { prompts: { "tasks/qa.md": { source: { layer: "project" }, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) } } } });
+  });
+
+  it("uses a Formal Leaf system prompt overlay when constructing child Pi commands", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "lambda-rlm-formal-overlay-"));
+    await mkdir(join(cwd, ".pi", "lambda-rlm", "prompts"), { recursive: true });
+    await writeFile(join(cwd, ".pi", "lambda-rlm", "prompts", "FORMAL-LEAF-SYSTEM-PROMPT.md"), "PROJECT FORMAL LEAF SYSTEM", "utf8");
+    const contextPath = join(cwd, "context.txt");
+    await writeFile(contextPath, "Formal overlay context", "utf8");
+    const systemPrompts: string[] = [];
+
+    const result = await executeLambdaRlmTool(
+      { contextPath: "context.txt", question: "What?" },
+      {
+        cwd,
+        leafProcessRunner: async (invocation) => {
+          const index = invocation.args.indexOf("--system-prompt");
+          systemPrompts.push(index >= 0 ? invocation.args[index + 1] ?? "" : "");
+          const promptFile = invocation.args.at(-1);
+          const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
+          return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : "formal answer\n", stderr: "" };
+        },
+      },
+    );
+
+    expect(result.details).toMatchObject({ ok: true });
+    expect(systemPrompts).toContain("PROJECT FORMAL LEAF SYSTEM");
+  });
+
+  it("fails prompt overlay validation before bridge or leaf execution", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "lambda-rlm-bad-prompt-"));
+    await mkdir(join(cwd, ".pi", "lambda-rlm", "prompts", "tasks"), { recursive: true });
+    await writeFile(join(cwd, ".pi", "lambda-rlm", "prompts", "tasks", "qa.md"), "Bad <<text>> <<typo>>", "utf8");
+    const contextPath = join(cwd, "context.txt");
+    await writeFile(contextPath, "context", "utf8");
+    let leafStarted = false;
+
+    const result = await executeLambdaRlmTool(
+      { contextPath: "context.txt", question: "What?" },
+      { cwd, leafProcessRunner: async () => { leafStarted = true; return { exitCode: 0, stdout: "", stderr: "" }; } },
+    );
+
+    expect(leafStarted).toBe(false);
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "validation_failed",
+      error: { type: "validation", code: "unknown_prompt_placeholder", field: "tasks/qa.md" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
+    });
+  });
+
   it("shares one configured model-process queue across simultaneous tool runs", async () => {
     const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
 import json, sys
