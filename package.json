@@ -8,10 +8,12 @@
     "test:pi-leaf-smoke": "vitest run tests/pi-leaf-smoke.test.ts",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "typebox": "^1.0.55"
+  },
   "devDependencies": {
     "@types/node": "^24.10.1",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.13",
-    "typebox": "^1.0.55"
+    "vitest": "^4.0.13"
   }
 }

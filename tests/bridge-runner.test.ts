@@ -100,7 +100,7 @@ print(json.dumps({"type":"model_callback_request","runId":request["runId"],"requ
           ok: false,
           requestId: call.requestId,
           error: { type: "child_process", code: "child_exit_nonzero", message: "child failed" },
-          diagnostics: { stdout: "", stderr: "bad auth", exitCode: 1 },
+          diagnostics: { stdout: "", stderr: "", stderrBytes: Buffer.byteLength("bad auth", "utf8"), stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/), exitCode: 1 },
         }),
       }),
     ).rejects.toMatchObject({
@@ -110,13 +110,13 @@ print(json.dumps({"type":"model_callback_request","runId":request["runId"],"requ
         failedRunResult: {
           error: { type: "model_callback_failure", code: "model_callback_failed" },
           modelCallFailure: {
-            diagnostics: { stdout: "", stderr: "bad auth", exitCode: 1 },
+            diagnostics: { stdout: "", stderr: "", stderrBytes: Buffer.byteLength("bad auth", "utf8"), stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/), exitCode: 1 },
           },
         },
         modelCallResponses: [
           {
             ok: false,
-            diagnostics: { stdout: "", stderr: "bad auth", exitCode: 1 },
+            diagnostics: { stdout: "", stderr: "", stderrBytes: Buffer.byteLength("bad auth", "utf8"), stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/), exitCode: 1 },
           },
         ],
       },

@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { executeLambdaRlmTool } from "../src/lambdaRlmTool.js";
+import { executeLambdaRlmTool as executeLambdaRlmToolRaw } from "../src/lambdaRlmTool.js";
 
 async function tempDir(prefix: string) {
   return mkdtemp(join(tmpdir(), prefix));
@@ -11,6 +11,11 @@ async function tempDir(prefix: string) {
 async function readPromptFromInvocation(invocation: { args: string[] }) {
   const promptFile = invocation.args.at(-1);
   return promptFile?.startsWith("@") ? readFile(promptFile.slice(1), "utf8") : Promise.resolve("");
+}
+
+async function executeLambdaRlmTool(params: unknown, options: Parameters<typeof executeLambdaRlmToolRaw>[1] = {}) {
+  const isolatedHome = options.homeDir || options.globalConfigPath ? undefined : await mkdtemp(join(tmpdir(), "lambda-rlm-isolated-home-"));
+  return executeLambdaRlmToolRaw(params, { ...(isolatedHome ? { homeDir: isolatedHome } : {}), ...options });
 }
 
 describe("final MVP mock end-to-end scenarios", () => {

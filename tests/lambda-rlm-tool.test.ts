@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { executeLambdaRlmTool, LambdaRlmValidationError } from "../src/lambdaRlmTool.js";
+import { executeLambdaRlmTool as executeLambdaRlmToolRaw, LambdaRlmValidationError } from "../src/lambdaRlmTool.js";
 import { ModelCallConcurrencyQueue } from "../src/modelCallQueue.js";
 
 async function tempContextFile(content: string) {
@@ -10,6 +10,11 @@ async function tempContextFile(content: string) {
   const path = join(dir, "context.txt");
   await writeFile(path, content, "utf8");
   return path;
+}
+
+async function executeLambdaRlmTool(params: unknown, options: Parameters<typeof executeLambdaRlmToolRaw>[1] = {}) {
+  const isolatedHome = options.homeDir || options.globalConfigPath ? undefined : await mkdtemp(join(tmpdir(), "lambda-rlm-isolated-home-"));
+  return executeLambdaRlmToolRaw(params, { ...(isolatedHome ? { homeDir: isolatedHome } : {}), ...options });
 }
 
 async function tempPythonBridgeScript(source: string) {
@@ -314,8 +319,12 @@ print(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"conten
             requestId: "model-call-1",
             error: { type: "child_process", code: "child_exit_nonzero" },
             diagnostics: {
-              stdout: "leaf stdout before failure",
-              stderr: "leaf stderr auth failure",
+              stdout: "",
+              stderr: "",
+              stdoutBytes: Buffer.byteLength("leaf stdout before failure", "utf8"),
+              stderrBytes: Buffer.byteLength("leaf stderr auth failure", "utf8"),
+              stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+              stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
               exitCode: 7,
               signal: null,
             },
@@ -325,8 +334,12 @@ print(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"conten
           error: { type: "model_callback_failure", code: "model_callback_failed" },
           modelCallFailure: {
             diagnostics: {
-              stdout: "leaf stdout before failure",
-              stderr: "leaf stderr auth failure",
+              stdout: "",
+              stderr: "",
+              stdoutBytes: Buffer.byteLength("leaf stdout before failure", "utf8"),
+              stderrBytes: Buffer.byteLength("leaf stderr auth failure", "utf8"),
+              stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+              stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
               exitCode: 7,
               signal: null,
             },
@@ -419,7 +432,77 @@ print("{not json", flush=True)
         stderrDiagnosticsChars: expect.any(Number),
         protocolError: {
           code: "malformed_stdout_json",
-          stdoutLine: "{not json",
+          offendingStdoutLine: { bytes: Buffer.byteLength("{not json", "utf8"), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+        },
+      },
+    });
+    expect(JSON.stringify(result.details)).not.toContain("{not json");
+    expect(JSON.stringify(result.details)).not.toContain("bridge diagnostic before malformed stdout");
+  });
+
+  it("sanitizes child stdout and stderr in runtime failure details", async () => {
+    const contextPath = await tempContextFile("child failure context");
+    const rawStdout = "RAW_CHILD_STDOUT_SECRET";
+    const rawStderr = "RAW_CHILD_STDERR_SECRET";
+
+    const result = await executeLambdaRlmTool(
+      { contextPath, question: "Trigger child failure?" },
+      {
+        contextWindowChars: 1000,
+        leafProcessRunner: async () => ({ exitCode: 17, signal: null, stdout: rawStdout, stderr: rawStderr }),
+      },
+    );
+
+    const serialized = JSON.stringify(result.details);
+    expect(serialized).not.toContain(rawStdout);
+    expect(serialized).not.toContain(rawStderr);
+    expect(result.details).toMatchObject({
+      ok: false,
+      partialRun: {
+        modelCallResponses: [
+          {
+            ok: false,
+            diagnostics: {
+              stdout: "",
+              stderr: "",
+              stdoutBytes: Buffer.byteLength(rawStdout, "utf8"),
+              stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+              stderrBytes: Buffer.byteLength(rawStderr, "utf8"),
+              stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+              exitCode: 17,
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  it("sanitizes failed bridge payload diagnostics and reports accurate final-result counts", async () => {
+    const contextPath = await tempContextFile("failed bridge payload context");
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import json, sys
+request = json.loads(sys.stdin.readline())
+print(json.dumps({"type":"run_result","runId":request["runId"],"ok":False,"error":{"type":"runtime","code":"bridge_failed","message":"failed safely"},"modelCallFailure":{"ok":False,"requestId":"model-call-x","error":{"type":"child_process","code":"child_exit_nonzero","message":"child failed"},"diagnostics":{"stdout":"RAW_FAILED_PAYLOAD_STDOUT","stderr":"RAW_FAILED_PAYLOAD_STDERR","exitCode":2}}}), flush=True)
+`);
+
+    const result = await executeLambdaRlmTool({ contextPath, question: "What happened?" }, { bridgePath });
+
+    const serialized = JSON.stringify(result.details);
+    expect(serialized).not.toContain("RAW_FAILED_PAYLOAD_STDOUT");
+    expect(serialized).not.toContain("RAW_FAILED_PAYLOAD_STDERR");
+    expect(result.details).toMatchObject({
+      ok: false,
+      partialRun: {
+        finalResults: 1,
+        failedRunResult: {
+          modelCallFailure: {
+            diagnostics: {
+              stdout: "",
+              stderr: "",
+              stdoutBytes: Buffer.byteLength("RAW_FAILED_PAYLOAD_STDOUT", "utf8"),
+              stderrBytes: Buffer.byteLength("RAW_FAILED_PAYLOAD_STDERR", "utf8"),
+            },
+          },
         },
       },
     });

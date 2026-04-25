@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { diagnosticHash } from "./diagnostics.js";
 
 export const FORMAL_LEAF_SYSTEM_PROMPT = [
   "You are the bounded neural subroutine inside Lambda-RLM.",
@@ -168,11 +169,15 @@ export async function runFormalPiLeafModelCall(call: ModelCall, options: FormalL
       requestId: call.requestId,
       error: { type: "child_process", code, message },
       diagnostics: {
-        stdout: result.stdout,
-        stderr: result.stderr,
+        stdout: "",
+        stderr: "",
         exitCode: result.exitCode,
         ...(result.signal !== undefined ? { signal: result.signal } : {}),
-      },
+        stdoutBytes: Buffer.byteLength(result.stdout, "utf8"),
+        stdoutSha256: diagnosticHash(result.stdout),
+        stderrBytes: Buffer.byteLength(result.stderr, "utf8"),
+        stderrSha256: diagnosticHash(result.stderr),
+      } as LeafModelCallFailureDetails["diagnostics"],
     });
 
   try {

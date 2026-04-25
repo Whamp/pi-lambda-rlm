@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { executeLambdaRlmTool } from "../src/lambdaRlmTool.js";
+import { executeLambdaRlmTool as executeLambdaRlmToolRaw } from "../src/lambdaRlmTool.js";
 import { runFormalPiLeafModelCall } from "../src/leafRunner.js";
 
 const runSmoke = process.env.PI_LAMBDA_RLM_LEAF_SMOKE === "1";
@@ -13,6 +13,11 @@ async function tempContextFile(content: string) {
   const path = join(dir, "context.txt");
   await writeFile(path, content, "utf8");
   return path;
+}
+
+async function executeLambdaRlmTool(params: unknown, options: Parameters<typeof executeLambdaRlmToolRaw>[1] = {}) {
+  const isolatedHome = options.homeDir || options.globalConfigPath ? undefined : await mkdtemp(join(tmpdir(), "lambda-rlm-isolated-home-"));
+  return executeLambdaRlmToolRaw(params, { ...(isolatedHome ? { homeDir: isolatedHome } : {}), ...options });
 }
 
 describe.runIf(runSmoke)("gated real pi -p Formal Leaf smoke", () => {

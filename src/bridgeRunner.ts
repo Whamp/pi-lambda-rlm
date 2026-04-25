@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { LeafProcessFailure, type LeafModelCallFailureDetails, type LeafModelCallSuccess, type ModelCall } from "./leafRunner.js";
 import { ModelCallQueueCancelledError } from "./modelCallQueue.js";
+import { sanitizeLeafFailureDetails, summarizeStdoutLines, summarizeTextDiagnostic } from "./diagnostics.js";
 import type { ResolvedPromptBundle } from "./promptResolver.js";
 
 export type BridgeRunRequest = {
@@ -55,19 +56,25 @@ export class BridgeRunFailedError extends Error {
     ok: false;
     error: { type: "runtime"; code: string; message: string };
     failedRunResult: BridgeFailedRunResult;
-    diagnostics: { stderr: string; stdoutLines: string[] };
+    diagnostics: { stderr: ReturnType<typeof summarizeTextDiagnostic>; stdout: ReturnType<typeof summarizeStdoutLines> };
     modelCallResponses: ModelCallbackResponse[];
+    finalResults: number;
   };
 
-  constructor(failedRunResult: BridgeFailedRunResult, diagnostics: { stderr: string; stdoutLines: string[] }, modelCallResponses: ModelCallbackResponse[]) {
+  constructor(failedRunResult: BridgeFailedRunResult, diagnostics: { stderr: string; stdoutLines: string[] }, modelCallResponses: ModelCallbackResponse[], finalResults = 0) {
     super(failedRunResult.error.message);
     this.name = "BridgeRunFailedError";
+    const sanitizedFailedRunResult = {
+      ...failedRunResult,
+      ...(failedRunResult.modelCallFailure ? { modelCallFailure: sanitizeLeafFailureDetails(failedRunResult.modelCallFailure) } : {}),
+    };
     this.details = {
       ok: false,
-      error: { type: "runtime", code: failedRunResult.error.code, message: failedRunResult.error.message },
-      failedRunResult,
-      diagnostics,
-      modelCallResponses,
+      error: { type: "runtime", code: sanitizedFailedRunResult.error.code, message: sanitizedFailedRunResult.error.message },
+      failedRunResult: sanitizedFailedRunResult,
+      diagnostics: { stderr: summarizeTextDiagnostic(diagnostics.stderr), stdout: summarizeStdoutLines(diagnostics.stdoutLines) },
+      modelCallResponses: modelCallResponses.map((response) => (response.ok ? response : sanitizeLeafFailureDetails(response))),
+      finalResults,
     };
   }
 }
@@ -93,7 +100,7 @@ export class BridgeProtocolError extends Error {
   readonly details: {
     ok: false;
     error: { type: "protocol"; code: string; message: string; line?: string };
-    diagnostics: { stderr: string; stdoutLines: string[] };
+    diagnostics: { stderr: ReturnType<typeof summarizeTextDiagnostic>; stdout: ReturnType<typeof summarizeStdoutLines>; offendingLine?: ReturnType<typeof summarizeTextDiagnostic> };
   };
 
   constructor(code: string, message: string, diagnostics: { stderr: string; stdoutLines: string[]; line?: string }) {
@@ -101,8 +108,12 @@ export class BridgeProtocolError extends Error {
     this.name = "BridgeProtocolError";
     this.details = {
       ok: false,
-      error: { type: "protocol", code, message, ...(diagnostics.line ? { line: diagnostics.line } : {}) },
-      diagnostics: { stderr: diagnostics.stderr, stdoutLines: diagnostics.stdoutLines },
+      error: { type: "protocol", code, message },
+      diagnostics: {
+        stderr: summarizeTextDiagnostic(diagnostics.stderr),
+        stdout: summarizeStdoutLines(diagnostics.stdoutLines),
+        ...(diagnostics.line ? { offendingLine: summarizeTextDiagnostic(diagnostics.line) } : {}),
+      },
     };
   }
 }
@@ -247,7 +258,7 @@ export async function runSyntheticBridge(options: {
       try {
         message = JSON.parse(line);
       } catch {
-        fail(protocolError("malformed_stdout_json", `Bridge stdout line was not valid JSON: ${line}`, line));
+        fail(protocolError("malformed_stdout_json", "Bridge stdout line was not valid JSON.", line));
         return;
       }
 
@@ -310,6 +321,7 @@ export async function runSyntheticBridge(options: {
               },
               { stderr, stdoutLines },
               modelCallResponses,
+              0,
             ),
           );
           pendingCallbackId = undefined;
@@ -320,8 +332,9 @@ export async function runSyntheticBridge(options: {
           .modelCallRunner(call)
           .then((response) => {
             if (!settled && child.stdin.writable) {
-              modelCallResponses.push({ ...response, metadata: callbackMetadata });
-              void writeBridgeMessage({ type: "model_callback_response", runId: options.runId, ...response }, "model callback response")
+              const safeResponse = response.ok ? response : sanitizeLeafFailureDetails(response);
+              modelCallResponses.push({ ...safeResponse, metadata: callbackMetadata });
+              void writeBridgeMessage({ type: "model_callback_response", runId: options.runId, ...safeResponse }, "model callback response")
                 .then(() => {
                   pendingCallbackId = undefined;
                 })
@@ -350,8 +363,9 @@ export async function runSyntheticBridge(options: {
                       },
                       diagnostics: { stdout: "", stderr: "", exitCode: null },
                     };
-              modelCallResponses.push({ ...response, metadata: callbackMetadata });
-              void writeBridgeMessage({ type: "model_callback_response", runId: options.runId, ...response }, "model callback response")
+              const safeResponse = sanitizeLeafFailureDetails(response);
+              modelCallResponses.push({ ...safeResponse, metadata: callbackMetadata });
+              void writeBridgeMessage({ type: "model_callback_response", runId: options.runId, ...safeResponse }, "model callback response")
                 .then(() => {
                   pendingCallbackId = undefined;
                 })
@@ -376,7 +390,7 @@ export async function runSyntheticBridge(options: {
             ...(typeof typed.modelCalls === "number" ? { modelCalls: typed.modelCalls } : {}),
             ...(isLeafModelCallFailureDetails(typed.modelCallFailure) ? { modelCallFailure: typed.modelCallFailure } : {}),
           };
-          fail(new BridgeRunFailedError(failedRunResult, { stderr, stdoutLines }, modelCallResponses));
+          fail(new BridgeRunFailedError(failedRunResult, { stderr, stdoutLines }, modelCallResponses, 1));
           return;
         }
         if (typed.ok !== true || typed.runId !== options.runId || typeof typed.content !== "string") {

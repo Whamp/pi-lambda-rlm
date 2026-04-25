@@ -90,9 +90,9 @@ describe("Formal Pi leaf runner", () => {
         ok: false,
         requestId: "model-call-1",
         error: { type: "child_process", code: "child_exit_nonzero", message: expect.stringContaining("2") },
-        diagnostics: { stdout: "partial stdout", stderr: "bad auth", exitCode: 2 },
+        diagnostics: { stdout: "", stderr: "", stdoutBytes: Buffer.byteLength("partial stdout", "utf8"), stderrBytes: Buffer.byteLength("bad auth", "utf8"), stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/), stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/), exitCode: 2 },
       },
-    } satisfies Partial<LeafProcessFailure>);
+    });
   });
 
   it("aborts a stuck child process on per-model-call timeout and reports a structured timeout failure", async () => {
@@ -118,7 +118,7 @@ describe("Formal Pi leaf runner", () => {
         ok: false,
         requestId: "model-call-timeout",
         error: { type: "child_process", code: "per_model_call_timeout" },
-        diagnostics: { stdout: "partial stdout", stderr: "timed out", exitCode: null, signal: "SIGTERM" },
+        diagnostics: { stdout: "", stderr: "", stdoutBytes: Buffer.byteLength("partial stdout", "utf8"), stderrBytes: Buffer.byteLength("timed out", "utf8"), stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/), stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/), exitCode: null, signal: "SIGTERM" },
       },
     });
     expect(observedAbort).toBe(true);
