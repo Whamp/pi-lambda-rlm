@@ -1,61 +1,128 @@
 import sys
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 EXTENSION_DIR = Path(__file__).resolve().parents[2] / ".pi" / "extensions" / "lambda-rlm"
 sys.path.insert(0, str(EXTENSION_DIR))
 
-from local_lambda_rlm import LambdaRLM
-from local_lambda_rlm.clients import BaseLM
+import rlm.lambda_rlm as lambda_rlm_module
+from rlm.clients import BaseLM
+from rlm.core.types import ModelUsageSummary, UsageSummary
+from rlm.lambda_rlm import LambdaRLM
+
+UPSTREAM_COMMIT = "3874d393483dc4299101918cf8e9af670194bd88"
 
 
 class DeterministicFakeBaseLM(BaseLM):
     def __init__(self):
-        self.prompts = []
+        super().__init__(model_name="deterministic-fake")
+        self.calls = []
 
     def completion(self, prompt):
-        self.prompts.append(prompt)
         prompt_text = str(prompt)
-        if "Classify the task" in prompt_text:
+        self.calls.append(
+            {
+                "prompt": prompt_text,
+                "thread": threading.current_thread().name,
+                "category": self._category(prompt_text),
+            }
+        )
+        if "Single digit:" in prompt_text and "select the single most appropriate task type" in prompt_text:
             return "2"
-        if "Is the following text relevant" in prompt_text:
+        if "Does this excerpt contain information relevant" in prompt_text:
             return "YES"
-        if "Answer the question using only this text chunk" in prompt_text:
-            if "Ada Lovelace" in prompt_text:
-                return "Ada Lovelace wrote notes about the Analytical Engine."
-            return "No answer found in this chunk."
-        if "Synthesize the relevant partial answers" in prompt_text:
+        if "Using the following context, answer" in prompt_text:
+            return "Partial answer: Ada Lovelace wrote notes about the Analytical Engine."
+        if "Synthesise these partial answers" in prompt_text:
             return "Ada Lovelace wrote notes about the Analytical Engine."
-        self.fail(f"unexpected prompt: {prompt_text[:100]}")
+        raise AssertionError(f"unexpected prompt: {prompt_text[:200]}")
+
+    async def acompletion(self, prompt):
+        return self.completion(prompt)
+
+    def get_usage_summary(self):
+        return UsageSummary(
+            model_usage_summaries={
+                self.model_name: ModelUsageSummary(
+                    total_calls=len(self.calls),
+                    total_input_tokens=0,
+                    total_output_tokens=0,
+                    total_cost=None,
+                )
+            }
+        )
+
+    def get_last_usage(self):
+        return ModelUsageSummary(
+            total_calls=1,
+            total_input_tokens=0,
+            total_output_tokens=0,
+            total_cost=None,
+        )
+
+    def categories(self):
+        return [call["category"] for call in self.calls]
+
+    @staticmethod
+    def _category(prompt):
+        if "Single digit:" in prompt:
+            return "task"
+        if "Does this excerpt contain information relevant" in prompt:
+            return "filter"
+        if "Using the following context, answer" in prompt:
+            return "leaf"
+        if "Synthesise these partial answers" in prompt:
+            return "reducer"
+        return "unknown"
 
 
 class LambdaRLMInjectedClientTests(unittest.TestCase):
-    def test_injected_base_lm_drives_real_lambda_rlm_qa_planning_filter_leaf_and_reduce(self):
+    def test_injected_base_lm_runs_upstream_local_repl_lmhandler_qa_filter_leaf_and_reduce(self):
         fake = DeterministicFakeBaseLM()
-        context = " ".join([
-            "Ada Lovelace wrote notes about the Analytical Engine.",
-            "Grace Hopper worked on compilers.",
-            "Katherine Johnson calculated trajectories.",
-            "Margaret Hamilton led Apollo software.",
-        ])
+        context = " ".join(
+            [
+                "Ada Lovelace wrote notes about the Analytical Engine.",
+                "Grace Hopper worked on compilers and programming languages.",
+                "Katherine Johnson calculated trajectories for spaceflight.",
+                "Margaret Hamilton led Apollo software engineering work.",
+                "The Analytical Engine notes described algorithms and computation.",
+            ]
+        )
         prompt = f"Context:\n{context}\n\nQuestion: Who wrote notes about the Analytical Engine?\n\nAnswer:"
 
         result = LambdaRLM(client=fake, context_window_chars=80).completion(prompt)
 
         self.assertEqual(result.response, "Ada Lovelace wrote notes about the Analytical Engine.")
-        prompts = "\n---\n".join(fake.prompts)
-        self.assertGreaterEqual(len(fake.prompts), 4)
-        self.assertIn("Classify the task", prompts)
-        self.assertIn("Is the following text relevant", prompts)
-        self.assertIn("Answer the question using only this text chunk", prompts)
-        self.assertIn("Synthesize the relevant partial answers", prompts)
-        self.assertEqual(result.metadata["patchBoundary"]["upstreamCommit"], "3874d393483dc4299101918cf8e9af670194bd88")
-        self.assertEqual(result.metadata["plan"]["task_type"], "qa")
-        self.assertGreater(result.metadata["model_calls"]["leaf"], 1)
+        categories = fake.categories()
+        self.assertIn("task", categories)
+        self.assertIn("filter", categories)
+        self.assertIn("leaf", categories)
+        self.assertIn("reducer", categories)
+        self.assertGreater(categories.count("leaf"), 1)
 
-    def test_default_client_path_remains_available_without_injected_client(self):
-        with self.assertRaisesRegex(RuntimeError, "Default Lambda-RLM client path selected"):
-            LambdaRLM(backend="openai", backend_kwargs={}).completion("Context:\nsmall\n\nQuestion: What?\n\nAnswer:")
+        main_thread = threading.current_thread().name
+        lmhandler_categories = {
+            call["category"] for call in fake.calls if call["thread"] != main_thread
+        }
+        self.assertGreaterEqual({"filter", "leaf", "reducer"}, lmhandler_categories)
+        self.assertEqual(result.metadata["patchBoundary"]["upstreamCommit"], UPSTREAM_COMMIT)
+        self.assertEqual(result.metadata["patchBoundary"]["localPatch"], "optional BaseLM client injection")
+
+    def test_default_client_path_delegates_to_upstream_factory_when_client_is_omitted(self):
+        fake = DeterministicFakeBaseLM()
+        with mock.patch.object(lambda_rlm_module, "get_client", return_value=fake) as get_client:
+            LambdaRLM(backend="openai", backend_kwargs={"model_name": "gpt-test"}).completion(
+                "Context:\nsmall\n\nQuestion: What?\n\nAnswer:"
+            )
+
+        get_client.assert_called_once_with("openai", {"model_name": "gpt-test"})
+
+    def test_local_fork_documents_exact_upstream_commit_and_injection_patch_boundary(self):
+        self.assertEqual(lambda_rlm_module.UPSTREAM_REFERENCE_COMMIT, UPSTREAM_COMMIT)
+        self.assertIn("client: BaseLM | None = None", Path(lambda_rlm_module.__file__).read_text())
+        self.assertIn("self.client or get_client(self.backend, self.backend_kwargs)", Path(lambda_rlm_module.__file__).read_text())
 
 
 if __name__ == "__main__":
