@@ -3,35 +3,28 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BridgeRunFailedError, runSyntheticBridge } from "./bridgeRunner.js";
 import { runFormalPiLeafModelCall, type LeafThinking, type ProcessRunner } from "./leafRunner.js";
+import {
+  DEFAULT_VISIBLE_OUTPUT_LIMIT,
+  countLines,
+  formatRuntimeFailure,
+  formatSuccessResult,
+  formatValidationFailure,
+  sha256Hex,
+  type SourceMetadata,
+  type TextContent,
+} from "./resultFormatter.js";
 
 const ALLOWED_KEYS = new Set(["contextPath", "question"]);
-const VISIBLE_OUTPUT_LIMIT = 4096;
 
 export type LambdaRlmParams = {
   contextPath: string;
   question: string;
 };
 
-type TextContent = { type: "text"; text: string };
-
 export type LambdaRlmToolResult = {
   content: TextContent[];
   details: Record<string, unknown>;
 };
-
-export class LambdaRlmRuntimeError extends Error {
-  readonly details: {
-    ok: false;
-    error: { type: "runtime"; code: string; message: string };
-    bridgeRun: Record<string, unknown>;
-  };
-
-  constructor(details: LambdaRlmRuntimeError["details"]) {
-    super(details.error.message);
-    this.name = "LambdaRlmRuntimeError";
-    this.details = details;
-  }
-}
 
 export class LambdaRlmValidationError extends Error {
   readonly details: {
@@ -42,7 +35,7 @@ export class LambdaRlmValidationError extends Error {
       message: string;
       field?: string;
     };
-    fakeRun: { executionStarted: false };
+    execution: { executionStarted: false; partialDetailsAvailable: false };
   };
 
   constructor(code: string, message: string, field?: string) {
@@ -51,7 +44,7 @@ export class LambdaRlmValidationError extends Error {
     this.details = {
       ok: false,
       error: { type: "validation", code, message, ...(field ? { field } : {}) },
-      fakeRun: { executionStarted: false },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
     };
   }
 }
@@ -106,14 +99,15 @@ async function loadContextFile(contextPath: string, cwd: string) {
   }
 }
 
-function boundedText(text: string) {
-  if (text.length <= VISIBLE_OUTPUT_LIMIT) return { text, truncated: false };
-  return { text: text.slice(0, VISIBLE_OUTPUT_LIMIT - 80) + "\n[Lambda-RLM output truncated to stay within tool bounds.]", truncated: true };
-}
-
-function countLines(text: string) {
-  if (text.length === 0) return 0;
-  return text.split("\n").length;
+function toSourceMetadata(input: { path: string; resolvedPath: string; content: string; bytes: number }): SourceMetadata {
+  return {
+    path: input.path,
+    resolvedPath: input.resolvedPath,
+    bytes: input.bytes,
+    chars: input.content.length,
+    lines: countLines(input.content),
+    sha256: sha256Hex(input.content),
+  };
 }
 
 export async function executeLambdaRlmTool(
@@ -129,15 +123,42 @@ export async function executeLambdaRlmTool(
     leafTimeoutMs?: number;
     /** Internal/test run-control knob; not part of the public lambda_rlm params schema. */
     contextWindowChars?: number;
+    /** Internal/default output bound; TOML configurability is intentionally deferred. */
+    outputMaxVisibleChars?: number;
+    /** Optional directory for recoverable full output when truncation occurs. */
+    fullOutputDir?: string;
   } = {},
 ): Promise<LambdaRlmToolResult> {
-  const validated = validateLambdaRlmParams(params);
+  let validated: LambdaRlmParams;
+  try {
+    validated = validateLambdaRlmParams(params);
+  } catch (error) {
+    if (error instanceof LambdaRlmValidationError) {
+      return formatValidationFailure(error.details.error);
+    }
+    throw error;
+  }
+
   const cwd = options.cwd ?? process.cwd();
-  const loaded = await loadContextFile(validated.contextPath, cwd);
+  let loaded: Awaited<ReturnType<typeof loadContextFile>>;
+  try {
+    loaded = await loadContextFile(validated.contextPath, cwd);
+  } catch (error) {
+    if (error instanceof LambdaRlmValidationError) {
+      return formatValidationFailure(error.details.error);
+    }
+    throw error;
+  }
+  const sourceMetadata = toSourceMetadata({ path: validated.contextPath, ...loaded });
   const bridgePath = options.bridgePath ?? fileURLToPath(new URL("../.pi/extensions/lambda-rlm/bridge.py", import.meta.url));
   const runId = `lambda-rlm-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const leafModel = options.leafModel ?? process.env.LAMBDA_RLM_LEAF_MODEL ?? "google/gemini-3-flash-preview";
   const leafThinking = options.leafThinking ?? "off";
+  const outputOptions = {
+    maxVisibleChars: options.outputMaxVisibleChars ?? DEFAULT_VISIBLE_OUTPUT_LIMIT,
+    ...(options.fullOutputDir ? { fullOutputDir: options.fullOutputDir } : {}),
+    runId,
+  };
 
   let bridge;
   try {
@@ -160,11 +181,13 @@ export async function executeLambdaRlmTool(
     });
   } catch (error) {
     if (error instanceof BridgeRunFailedError) {
-      throw new LambdaRlmRuntimeError({
-        ok: false,
+      return formatRuntimeFailure({
         error: error.details.error,
-        bridgeRun: {
+        source: sourceMetadata,
+        question: validated.question,
+        partialBridgeRun: {
           executionStarted: true,
+          partialDetailsAvailable: true,
           pythonBridge: true,
           protocol: "strict-stdout-stdin-ndjson",
           runId,
@@ -185,64 +208,49 @@ export async function executeLambdaRlmTool(
           leafModel,
           leafThinking,
         },
+        output: outputOptions,
       });
     }
     throw error;
   }
 
-  const rawAnswer = [
-    bridge.content,
-    "",
-    `Real Lambda-RLM completed over the referenced file (${loaded.content.length} characters, ${countLines(loaded.content)} lines).`,
-    `Model callbacks serviced by the extension-owned Formal Leaf runner: ${bridge.modelCallResponses.length}.`,
-  ].join("\n");
-  const answer = boundedText(rawAnswer);
-
-  return {
-    content: [{ type: "text", text: answer.text }],
-    details: {
-      ok: true,
-      input: {
-        source: "file",
-        contextPath: validated.contextPath,
-        resolvedContextPath: loaded.resolvedPath,
-        contextChars: loaded.content.length,
-        contextBytes: loaded.bytes,
-        contextLines: countLines(loaded.content),
-        questionChars: validated.question.length,
-      },
-      bridgeRun: {
-        executionStarted: true,
-        pythonBridge: true,
-        protocol: "strict-stdout-stdin-ndjson",
-        runId,
-        stdoutProtocolLines: bridge.stdoutLines.length,
-        stderrDiagnosticsChars: bridge.stderr.length,
-        modelCallbacks: bridge.modelCallbacks.map((callback) => ({
-          requestId: callback.requestId,
-          metadata: callback.metadata,
-          promptChars: callback.prompt.length,
-        })),
-        modelCallResponses: bridge.modelCallResponses.map((response) => ({
-          ok: response.ok,
-          requestId: response.requestId,
-          ...(response.ok ? { stdoutChars: response.diagnostics.stdoutChars } : { error: response.error }),
-        })),
-        finalResults: bridge.finalResults.length,
-        realLambdaRlm: true,
-        childPiLeafCalls: bridge.modelCallResponses.length,
-        leafProfile: "formal_pi_print",
-        leafModel,
-        leafThinking,
-        ...(bridge.metadata ? { lambdaRlm: bridge.metadata } : {}),
-      },
-      output: {
-        bounded: true,
-        visibleChars: answer.text.length,
-        truncated: answer.truncated,
-        maxVisibleChars: VISIBLE_OUTPUT_LIMIT,
-      },
-      warnings: [],
-    },
+  const modelCallSummary = {
+    total: bridge.modelCallResponses.length,
+    succeeded: bridge.modelCallResponses.filter((response) => response.ok).length,
+    failed: bridge.modelCallResponses.filter((response) => !response.ok).length,
+    phases: bridge.modelCallbacks.map((callback) => callback.metadata?.phase).filter((phase): phase is string => typeof phase === "string"),
   };
+
+  return formatSuccessResult({
+    answer: bridge.content,
+    source: sourceMetadata,
+    question: validated.question,
+    modelCallSummary,
+    bridgeRun: {
+      executionStarted: true,
+      pythonBridge: true,
+      protocol: "strict-stdout-stdin-ndjson",
+      runId,
+      stdoutProtocolLines: bridge.stdoutLines.length,
+      stderrDiagnosticsChars: bridge.stderr.length,
+      modelCallbacks: bridge.modelCallbacks.map((callback) => ({
+        requestId: callback.requestId,
+        metadata: callback.metadata,
+        promptChars: callback.prompt.length,
+      })),
+      modelCallResponses: bridge.modelCallResponses.map((response) => ({
+        ok: response.ok,
+        requestId: response.requestId,
+        ...(response.ok ? { stdoutChars: response.diagnostics.stdoutChars } : { error: response.error }),
+      })),
+      finalResults: bridge.finalResults.length,
+      realLambdaRlm: true,
+      childPiLeafCalls: bridge.modelCallResponses.length,
+      leafProfile: "formal_pi_print",
+      leafModel,
+      leafThinking,
+      ...(bridge.metadata ? { lambdaRlm: bridge.metadata } : {}),
+    },
+    output: outputOptions,
+  });
 }
