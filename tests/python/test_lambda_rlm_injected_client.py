@@ -35,7 +35,7 @@ class DeterministicFakeBaseLM(BaseLM):
             return "YES"
         if "Using the following context, answer" in prompt_text:
             return "Partial answer: Ada Lovelace wrote notes about the Analytical Engine."
-        if "Synthesise these partial answers" in prompt_text:
+        if "Synthesise these partial answers" in prompt_text or "Synthesize these partial answers" in prompt_text:
             return "Ada Lovelace wrote notes about the Analytical Engine."
         raise AssertionError(f"unexpected prompt: {prompt_text[:200]}")
 
@@ -161,16 +161,22 @@ class LambdaRLMInjectedClientTests(unittest.TestCase):
         self.assertIn("Source:\nThe source literally says <<query>> here.", leaf_prompts[0])
         self.assertNotIn("The source literally says What token appears? here.", leaf_prompts[0])
 
-    def test_explicit_metadata_crosses_task_leaf_filter_and_reducer_without_prompt_text_inference(self):
+    def test_registry_overrides_task_detection_leaf_filter_and_reducer_with_arbitrary_text(self):
         fake = MetadataAwareFakeBaseLM()
         context = " ".join([f"chunk {i} Ada Lovelace Analytical Engine metadata path." for i in range(20)])
         prompt = f"Context:\n{context}\n\nQuestion: Who is mentioned?\n\nAnswer:"
+        registry = LambdaPromptRegistry.from_bridge_bundle(
+            {
+                "prompts": {
+                    "TASK-DETECTION-PROMPT.md": {"template": "ARBITRARY DETECT <<metadata>>"},
+                    "tasks/qa.md": {"template": "ARBITRARY LEAF query=<<query>> text=<<text>>"},
+                    "filters/relevance.md": {"template": "ARBITRARY FILTER query=<<query>> preview=<<preview>>"},
+                    "reducers/select-relevant.md": {"template": "ARBITRARY REDUCER query=<<query>> parts=<<parts>>"},
+                }
+            }
+        )
 
-        with mock.patch.object(lambda_rlm_module, "_TASK_DETECTION_PROMPT", "OVERRIDDEN TASK DETECTION {metadata}"), \
-             mock.patch.dict(lambda_rlm_module.TASK_TEMPLATES, {lambda_rlm_module.TaskType.QA: "OVERRIDDEN LEAF PROMPT query={query} text={text}"}), \
-             mock.patch.object(lambda_rlm_module, "FILTER_RELEVANCE_TEMPLATE", "OVERRIDDEN FILTER query={query} preview={preview}"), \
-             mock.patch.object(lambda_rlm_module, "SELECT_RELEVANT_REDUCER_TEMPLATE", "OVERRIDDEN REDUCER query={query} parts={parts}"):
-            result = LambdaRLM(client=fake, context_window_chars=80).completion(prompt)
+        result = LambdaRLM(client=fake, context_window_chars=80, prompt_registry=registry).completion(prompt)
 
         self.assertEqual(result.response, "Final answer from explicit reducer metadata.")
         by_combinator = {call["metadata"]["combinator"] for call in fake.calls}
@@ -192,7 +198,13 @@ class LambdaRLMInjectedClientTests(unittest.TestCase):
         self.assertIn("TASK-DETECTION-PROMPT.md", prompt_keys)
         self.assertIn("tasks/qa.md", prompt_keys)
         self.assertIn("filters/relevance.md", prompt_keys)
-        self.assertIn("reducers/select_relevant.md", prompt_keys)
+        self.assertIn("reducers/select-relevant.md", prompt_keys)
+
+        prompts_by_combinator = {call["metadata"]["combinator"]: call["prompt"] for call in fake.calls}
+        self.assertIn("ARBITRARY DETECT", prompts_by_combinator["classifier"])
+        self.assertIn("ARBITRARY FILTER", prompts_by_combinator["filter"])
+        self.assertIn("ARBITRARY LEAF", prompts_by_combinator["leaf"])
+        self.assertIn("ARBITRARY REDUCER", prompts_by_combinator["reduce"])
 
     def test_injected_base_lm_runs_upstream_local_repl_lmhandler_qa_filter_leaf_and_reduce(self):
         fake = DeterministicFakeBaseLM()

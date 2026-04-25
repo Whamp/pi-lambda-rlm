@@ -132,6 +132,21 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
         stdoutChars: expect.any(Number),
       }),
     );
+    const promptDetails = (result.details.bridgeRun as { prompts: Record<string, Record<string, unknown>> }).prompts;
+    expect(promptDetails["TASK-DETECTION-PROMPT.md"]).toEqual(
+      expect.objectContaining({ source: expect.objectContaining({ layer: "built_in" }), bytes: expect.any(Number), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+    );
+    expect(promptDetails["tasks/qa.md"]).toEqual(
+      expect.objectContaining({ source: expect.objectContaining({ layer: "built_in" }), bytes: expect.any(Number), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+    );
+    expect(promptDetails["filters/relevance.md"]).toEqual(
+      expect.objectContaining({ source: expect.objectContaining({ layer: "built_in" }), bytes: expect.any(Number), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+    );
+    expect(promptDetails["reducers/select-relevant.md"]).toEqual(
+      expect.objectContaining({ source: expect.objectContaining({ layer: "built_in" }), bytes: expect.any(Number), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+    );
+    expect(promptDetails["tasks/qa.md"]).not.toHaveProperty("template");
+    expect(promptDetails["tasks/qa.md"]).not.toHaveProperty("body");
     expect(JSON.stringify(result.details)).not.toContain("Single digit:");
     expect(processCalls.length).toBeGreaterThan(1);
     expect(processCalls.some((call) => call.prompt.includes("Single digit:"))).toBe(true);

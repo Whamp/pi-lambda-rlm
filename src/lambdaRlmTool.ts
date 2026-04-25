@@ -200,11 +200,23 @@ function toSourceMetadata(input: LoadedSource): SourceMetadata {
   };
 }
 
+function safePromptSource(source: unknown) {
+  if (!source || typeof source !== "object") return source;
+  const record = source as { layer?: unknown; path?: unknown };
+  if (record.layer === "built_in") return { layer: "built_in", path: null };
+  return source;
+}
+
 function promptMetadata(prompts: Record<string, { source: unknown; shadowedSources: unknown; bytes: number; sha256: string }>) {
   return Object.fromEntries(
     Object.entries(prompts).map(([key, prompt]) => [
       key,
-      { source: prompt.source, shadowedSources: prompt.shadowedSources, bytes: prompt.bytes, sha256: prompt.sha256 },
+      {
+        source: safePromptSource(prompt.source),
+        shadowedSources: Array.isArray(prompt.shadowedSources) ? prompt.shadowedSources.map(safePromptSource) : prompt.shadowedSources,
+        bytes: prompt.bytes,
+        sha256: prompt.sha256,
+      },
     ]),
   );
 }

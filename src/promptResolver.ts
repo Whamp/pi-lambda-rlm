@@ -35,13 +35,28 @@ export type PromptBundleResult = { ok: true; bundle: ResolvedPromptBundle } | { 
 
 type PromptSpec = { required: string[]; allowed: string[] };
 
-const PROMPT_SPECS: Record<string, PromptSpec> = {
-  "tasks/qa.md": { required: ["text", "query"], allowed: ["text", "query"] },
+export const PROMPT_SPECS: Record<string, PromptSpec> = {
   "FORMAL-LEAF-SYSTEM-PROMPT.md": { required: [], allowed: [] },
+  "TASK-DETECTION-PROMPT.md": { required: ["metadata"], allowed: ["metadata"] },
+  "tasks/summarization.md": { required: ["text"], allowed: ["text", "query"] },
+  "tasks/qa.md": { required: ["text", "query"], allowed: ["text", "query"] },
+  "tasks/translation.md": { required: ["text"], allowed: ["text", "query"] },
+  "tasks/classification.md": { required: ["text"], allowed: ["text", "query"] },
+  "tasks/extraction.md": { required: ["text"], allowed: ["text", "query"] },
+  "tasks/analysis.md": { required: ["text"], allowed: ["text", "query"] },
+  "tasks/general.md": { required: ["text"], allowed: ["text", "query"] },
+  "filters/relevance.md": { required: ["query", "preview"], allowed: ["query", "preview"] },
+  "reducers/merge-summaries.md": { required: ["parts"], allowed: ["parts", "query"] },
+  "reducers/select-relevant.md": { required: ["parts", "query"], allowed: ["parts", "query"] },
+  "reducers/combine-analysis.md": { required: ["parts"], allowed: ["parts", "query"] },
 };
 
 const PROMPT_KEYS = Object.keys(PROMPT_SPECS);
 const PLACEHOLDER_RE = /<<([A-Za-z_][A-Za-z0-9_]*)>>/g;
+
+export function promptKeys() {
+  return [...PROMPT_KEYS];
+}
 
 export function defaultBuiltInPromptDir() {
   return fileURLToPath(new URL("../.pi/extensions/lambda-rlm/prompts", import.meta.url));
