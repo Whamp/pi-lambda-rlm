@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import { executeLambdaRlmTool, LambdaRlmValidationError } from "./lambdaRlmTool.js";
+import { runLambdaRlmDoctor } from "./doctor.js";
 import type { ProcessRunner } from "./leafRunner.js";
 import type { ModelCallConcurrencyQueue } from "./modelCallQueue.js";
 
@@ -52,7 +53,7 @@ export const LambdaRlmToolParameters = Type.Object(
 );
 
 type ToolUpdate = { content: Array<{ type: "text"; text: string }>; details?: Record<string, unknown> };
-type MinimalPiApi = { registerTool(tool: Record<string, unknown>): void };
+type MinimalPiApi = { registerTool(tool: Record<string, unknown>): void; registerCommand?: (command: Record<string, unknown>) => void };
 type MinimalExtensionContext = {
   cwd: string;
   leafProcessRunner?: ProcessRunner;
@@ -60,6 +61,26 @@ type MinimalExtensionContext = {
 
 export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
   const modelCallQueueState: { current?: ModelCallConcurrencyQueue } = {};
+
+  pi.registerCommand?.({
+    name: "/lambda-rlm-doctor",
+    description: "Runs non-mutating Lambda-RLM MVP setup diagnostics for Python, config, prompts, fork seams, Pi leaf command shape, and mock bridge readiness.",
+    async execute(_commandId: string, _params: unknown, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: MinimalExtensionContext) {
+      const report = await runLambdaRlmDoctor({
+        cwd: ctx.cwd,
+        ...(ctx.leafProcessRunner ? { processRunner: ctx.leafProcessRunner } : {}),
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `lambda_rlm doctor ${report.ok ? "passed" : "found errors"}: ${report.checks.filter((entry) => entry.status === "error").length} error(s), ${report.checks.filter((entry) => entry.status === "warn").length} warning(s).`,
+          },
+        ],
+        details: report,
+      };
+    },
+  });
 
   pi.registerTool({
     name: "lambda_rlm",

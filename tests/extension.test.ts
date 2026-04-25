@@ -8,6 +8,12 @@ function registeredLambdaRlmTool(register: typeof registerLambdaRlmExtension = r
   return tools.find((candidate) => candidate.name === "lambda_rlm");
 }
 
+function registeredLambdaRlmCommand(register: typeof registerLambdaRlmExtension = registerLambdaRlmExtension) {
+  const commands: any[] = [];
+  register({ registerTool: () => undefined, registerCommand: (command: any) => commands.push(command) } as any);
+  return commands.find((candidate) => candidate.name === "/lambda-rlm-doctor");
+}
+
 describe("lambda_rlm Pi extension registration", () => {
   it("registers a lambda_rlm tool with a strict path-based schema and optional per-run tightening", () => {
     const tool = registeredLambdaRlmTool();
@@ -140,6 +146,14 @@ describe("lambda_rlm Pi extension registration", () => {
       },
       execution: { executionStarted: false, partialDetailsAvailable: false },
     });
+  });
+
+  it("registers a non-mutating doctor command", () => {
+    const command = registeredLambdaRlmCommand();
+
+    expect(command).toBeTruthy();
+    expect(command.description).toMatch(/non-mutating/i);
+    expect(command.description).toMatch(/Python|config|prompts|mock bridge/i);
   });
 
   it("loads the Pi extension entrypoint and registers the lambda_rlm tool", () => {
