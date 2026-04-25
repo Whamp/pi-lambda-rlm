@@ -9,7 +9,7 @@ function registeredLambdaRlmTool(register: typeof registerLambdaRlmExtension = r
 }
 
 describe("lambda_rlm Pi extension registration", () => {
-  it("registers a lambda_rlm tool with a strict contextPath + question schema", () => {
+  it("registers a lambda_rlm tool with a strict path-based schema and optional per-run tightening", () => {
     const tool = registeredLambdaRlmTool();
 
     expect(tool).toBeTruthy();
@@ -20,9 +20,12 @@ describe("lambda_rlm Pi extension registration", () => {
       properties: {
         contextPath: { type: "string" },
         question: { type: "string" },
+        maxInputBytes: { type: "number" },
+        outputMaxBytes: { type: "number" },
+        outputMaxLines: { type: "number" },
       },
     });
-    expect(Object.keys(tool.parameters.properties).sort()).toEqual(["contextPath", "question"]);
+    expect(Object.keys(tool.parameters.properties).sort()).toEqual(["contextPath", "maxInputBytes", "outputMaxBytes", "outputMaxLines", "question"]);
   });
 
   it("describes the public tool as the real path-based Lambda-RLM integration", async () => {
@@ -96,6 +99,6 @@ describe("lambda_rlm Pi extension registration", () => {
 
     expect(tool).toBeTruthy();
     expect(tool.name).toBe("lambda_rlm");
-    expect(Object.keys(tool.parameters.properties).sort()).toEqual(["contextPath", "question"]);
+    expect(Object.keys(tool.parameters.properties).sort()).toEqual(["contextPath", "maxInputBytes", "outputMaxBytes", "outputMaxLines", "question"]);
   });
 });

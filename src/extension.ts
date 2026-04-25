@@ -12,6 +12,18 @@ export const LambdaRlmToolParameters = Type.Object(
       minLength: 1,
       description: "Question or instruction to answer using the referenced context file.",
     }),
+    maxInputBytes: Type.Optional(Type.Number({
+      minimum: 1,
+      description: "Optional per-run tightening for max input bytes; must be less than or equal to the resolved config limit.",
+    })),
+    outputMaxBytes: Type.Optional(Type.Number({
+      minimum: 1,
+      description: "Optional per-run tightening for visible output bytes; must be less than or equal to the resolved config limit.",
+    })),
+    outputMaxLines: Type.Optional(Type.Number({
+      minimum: 1,
+      description: "Optional per-run tightening for visible output lines; must be less than or equal to the resolved config limit.",
+    })),
   },
   { additionalProperties: false },
 );
@@ -32,7 +44,7 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
     promptSnippet: "Ask a question over one referenced context file without inlining file contents",
     promptGuidelines: [
       "Use lambda_rlm when a user asks a question over a large file by path and ordinary reading would waste parent-agent context.",
-      "Call lambda_rlm with contextPath and question only; do not pass inline context, raw prompts, or multiple paths.",
+      "Call lambda_rlm with contextPath and question, plus optional per-run tightening limits maxInputBytes/outputMaxBytes/outputMaxLines when needed; do not pass inline context, raw prompts, or multiple paths.",
       "lambda_rlm reads the path-based single-file input internally, runs vendored real Lambda-RLM planning and execution through the Python NDJSON bridge, and services model callbacks with extension-owned Formal Leaf child Pi calls.",
       "Expect a bounded result; the tool should not expose the full source file contents by default.",
     ],
