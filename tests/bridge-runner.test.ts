@@ -123,6 +123,44 @@ print(json.dumps({"type":"model_callback_request","runId":request["runId"],"requ
     });
   });
 
+  it("omits untrusted unknown stdout message type values from protocol errors", async () => {
+    const leakingType = "RAW_SECRET_SENTINEL";
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import json, sys
+sys.stdin.readline()
+print(json.dumps({"type":"${leakingType}"}), flush=True)
+`);
+
+    await expect(
+      runSyntheticBridge({
+        bridgePath,
+        runId: "run-unknown-type",
+        question: "What?",
+        contextPath: "context.txt",
+        modelCallRunner: successfulModelCallRunner,
+      }),
+    ).rejects.toMatchObject({
+      name: "BridgeProtocolError",
+      details: {
+        error: { code: "unknown_stdout_message_type", message: "Unknown bridge stdout message type." },
+        diagnostics: { offendingLine: { bytes: expect.any(Number), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) } },
+      },
+    });
+
+    try {
+      await runSyntheticBridge({
+        bridgePath,
+        runId: "run-unknown-type-recheck",
+        question: "What?",
+        contextPath: "context.txt",
+        modelCallRunner: successfulModelCallRunner,
+      });
+      throw new Error("expected bridge protocol error");
+    } catch (error) {
+      expect(JSON.stringify((error as BridgeProtocolError).details)).not.toContain(leakingType);
+    }
+  });
+
   it("fails with a structured protocol error when stdout contains malformed NDJSON", async () => {
     await expect(
       runSyntheticBridge({

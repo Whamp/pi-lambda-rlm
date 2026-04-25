@@ -2,6 +2,7 @@ import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { diagnosticHash } from "../src/diagnostics.js";
 import { executeLambdaRlmTool as executeLambdaRlmToolRaw, LambdaRlmValidationError } from "../src/lambdaRlmTool.js";
 import { ModelCallConcurrencyQueue } from "../src/modelCallQueue.js";
 
@@ -482,7 +483,7 @@ print("{not json", flush=True)
     const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
 import json, sys
 request = json.loads(sys.stdin.readline())
-print(json.dumps({"type":"run_result","runId":request["runId"],"ok":False,"error":{"type":"runtime","code":"bridge_failed","message":"failed safely"},"modelCallFailure":{"ok":False,"requestId":"model-call-x","rawPrompt":"RAW_PROMPT_SECRET_SENTINEL","source":"MODEL_RUNNER_SOURCE_SENTINEL","error":{"type":"child_process","code":"child_exit_nonzero","message":"child failed"},"diagnostics":{"stdout":"RAW_FAILED_PAYLOAD_STDOUT","stderr":"RAW_FAILED_PAYLOAD_STDERR","stdoutSha256":"SPOOFED_STDOUT_HASH_SENTINEL","stderrSha256":"SPOOFED_STDERR_HASH_SENTINEL","exitCode":2}}}), flush=True)
+print(json.dumps({"type":"run_result","runId":request["runId"],"ok":False,"error":{"type":"runtime","code":"bridge_failed","message":"failed safely"},"modelCallFailure":{"ok":False,"requestId":"model-call-x","rawPrompt":"RAW_PROMPT_SECRET_SENTINEL","source":"MODEL_RUNNER_SOURCE_SENTINEL","error":{"type":"child_process","code":"child_exit_nonzero","message":"child failed"},"diagnostics":{"stdout":"RAW_FAILED_PAYLOAD_STDOUT","stderr":"RAW_FAILED_PAYLOAD_STDERR","stdoutBytes":999999,"stdoutSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","stderrBytes":888888,"stderrSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","signal":"RAW_SECRET_SENTINEL","exitCode":2}}}), flush=True)
 `);
 
     const result = await executeLambdaRlmTool({ contextPath, question: "What happened?" }, { bridgePath });
@@ -492,8 +493,11 @@ print(json.dumps({"type":"run_result","runId":request["runId"],"ok":False,"error
     expect(serialized).not.toContain("RAW_FAILED_PAYLOAD_STDERR");
     expect(serialized).not.toContain("RAW_PROMPT_SECRET_SENTINEL");
     expect(serialized).not.toContain("MODEL_RUNNER_SOURCE_SENTINEL");
-    expect(serialized).not.toContain("SPOOFED_STDOUT_HASH_SENTINEL");
-    expect(serialized).not.toContain("SPOOFED_STDERR_HASH_SENTINEL");
+    expect(serialized).not.toContain("RAW_SECRET_SENTINEL");
+    expect(serialized).not.toContain("999999");
+    expect(serialized).not.toContain("888888");
+    expect(serialized).not.toContain("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(serialized).not.toContain("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     expect(result.details).toMatchObject({
       ok: false,
       partialRun: {
@@ -507,9 +511,9 @@ print(json.dumps({"type":"run_result","runId":request["runId"],"ok":False,"error
               stdout: "",
               stderr: "",
               stdoutBytes: Buffer.byteLength("RAW_FAILED_PAYLOAD_STDOUT", "utf8"),
-              stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+              stdoutSha256: diagnosticHash("RAW_FAILED_PAYLOAD_STDOUT"),
               stderrBytes: Buffer.byteLength("RAW_FAILED_PAYLOAD_STDERR", "utf8"),
-              stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+              stderrSha256: diagnosticHash("RAW_FAILED_PAYLOAD_STDERR"),
               exitCode: 2,
             },
           },

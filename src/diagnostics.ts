@@ -23,20 +23,56 @@ export function summarizeStdoutLines(lines: string[]) {
 }
 
 const SHA256_HEX = /^[a-f0-9]{64}$/;
-const SAFE_SIGNAL = /^[A-Z][A-Z0-9_]{0,31}$/;
 
-function safeNonnegativeInteger(value: unknown, fallback: number): number {
+const SAFE_SIGNALS = new Set<NodeJS.Signals>([
+  "SIGABRT",
+  "SIGALRM",
+  "SIGBUS",
+  "SIGCHLD",
+  "SIGCONT",
+  "SIGFPE",
+  "SIGHUP",
+  "SIGILL",
+  "SIGINT",
+  "SIGIO",
+  "SIGIOT",
+  "SIGKILL",
+  "SIGPIPE",
+  "SIGPOLL",
+  "SIGPROF",
+  "SIGPWR",
+  "SIGQUIT",
+  "SIGSEGV",
+  "SIGSTKFLT",
+  "SIGSTOP",
+  "SIGSYS",
+  "SIGTERM",
+  "SIGTRAP",
+  "SIGTSTP",
+  "SIGTTIN",
+  "SIGTTOU",
+  "SIGUNUSED",
+  "SIGURG",
+  "SIGUSR1",
+  "SIGUSR2",
+  "SIGVTALRM",
+  "SIGWINCH",
+  "SIGXCPU",
+  "SIGXFSZ",
+]);
+
+function safeSignal(value: unknown): NodeJS.Signals | null | undefined {
+  if (value === null) return null;
+  if (typeof value === "string" && SAFE_SIGNALS.has(value as NodeJS.Signals)) return value as NodeJS.Signals;
+  return undefined;
+}
+
+function existingSummaryBytes(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : fallback;
 }
 
-function safeSha256(value: unknown, fallbackText: string): string {
+function existingSummarySha256(value: unknown, fallbackText: string): string {
   return typeof value === "string" && SHA256_HEX.test(value) ? value : diagnosticHash(fallbackText);
-}
-
-function safeSignal(value: unknown): NodeJS.Signals | string | null | undefined {
-  if (value === null) return null;
-  if (typeof value === "string" && SAFE_SIGNAL.test(value)) return value;
-  return undefined;
 }
 
 function safeTextField(value: unknown, fallback: string): string {
@@ -51,11 +87,15 @@ function redactRawDiagnostics(message: string, stdout: string, stderr: string): 
   return redacted;
 }
 
-export function sanitizeLeafFailureDetails(details: LeafModelCallFailureDetails): LeafModelCallFailureDetails {
+function sanitizeLeafFailureDetailsWithSummaries(details: LeafModelCallFailureDetails, preserveExistingSummaries: boolean): LeafModelCallFailureDetails {
   const diagnostics = details.diagnostics as Record<string, unknown>;
   const stdout = typeof details.diagnostics.stdout === "string" ? details.diagnostics.stdout : "";
   const stderr = typeof details.diagnostics.stderr === "string" ? details.diagnostics.stderr : "";
   const signal = safeSignal(diagnostics.signal);
+  const stdoutBytes = preserveExistingSummaries && stdout === "" ? existingSummaryBytes(diagnostics.stdoutBytes, 0) : Buffer.byteLength(stdout, "utf8");
+  const stdoutSha256 = preserveExistingSummaries && stdout === "" ? existingSummarySha256(diagnostics.stdoutSha256, stdout) : diagnosticHash(stdout);
+  const stderrBytes = preserveExistingSummaries && stderr === "" ? existingSummaryBytes(diagnostics.stderrBytes, 0) : Buffer.byteLength(stderr, "utf8");
+  const stderrSha256 = preserveExistingSummaries && stderr === "" ? existingSummarySha256(diagnostics.stderrSha256, stderr) : diagnosticHash(stderr);
   const error = details.error as Record<string, unknown>;
   const message = redactRawDiagnostics(safeTextField(error.message, "Child process failed."), stdout, stderr);
 
@@ -72,10 +112,18 @@ export function sanitizeLeafFailureDetails(details: LeafModelCallFailureDetails)
       stderr: "",
       exitCode: typeof diagnostics.exitCode === "number" || diagnostics.exitCode === null ? diagnostics.exitCode : null,
       ...(signal !== undefined ? { signal } : {}),
-      stdoutBytes: safeNonnegativeInteger(diagnostics.stdoutBytes, Buffer.byteLength(stdout, "utf8")),
-      stdoutSha256: safeSha256(diagnostics.stdoutSha256, stdout),
-      stderrBytes: safeNonnegativeInteger(diagnostics.stderrBytes, Buffer.byteLength(stderr, "utf8")),
-      stderrSha256: safeSha256(diagnostics.stderrSha256, stderr),
+      stdoutBytes,
+      stdoutSha256,
+      stderrBytes,
+      stderrSha256,
     } as LeafModelCallFailureDetails["diagnostics"],
   };
+}
+
+export function sanitizeLeafFailureDetails(details: LeafModelCallFailureDetails): LeafModelCallFailureDetails {
+  return sanitizeLeafFailureDetailsWithSummaries(details, false);
+}
+
+export function sanitizeLocalLeafFailureDetails(details: LeafModelCallFailureDetails): LeafModelCallFailureDetails {
+  return sanitizeLeafFailureDetailsWithSummaries(details, true);
 }

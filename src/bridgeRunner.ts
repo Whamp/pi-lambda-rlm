@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { LeafProcessFailure, type LeafModelCallFailureDetails, type LeafModelCallSuccess, type ModelCall } from "./leafRunner.js";
 import { ModelCallQueueCancelledError } from "./modelCallQueue.js";
-import { sanitizeLeafFailureDetails, summarizeStdoutLines, summarizeTextDiagnostic } from "./diagnostics.js";
+import { sanitizeLeafFailureDetails, sanitizeLocalLeafFailureDetails, summarizeStdoutLines, summarizeTextDiagnostic } from "./diagnostics.js";
 import type { ResolvedPromptBundle } from "./promptResolver.js";
 
 export type BridgeRunRequest = {
@@ -64,16 +64,19 @@ export class BridgeRunFailedError extends Error {
   constructor(failedRunResult: BridgeFailedRunResult, diagnostics: { stderr: string; stdoutLines: string[] }, modelCallResponses: ModelCallbackResponse[], finalResults = 0) {
     super(failedRunResult.error.message);
     this.name = "BridgeRunFailedError";
+    const localFailure = failedRunResult.modelCallFailure
+      ? modelCallResponses.find((response): response is LeafModelCallFailureDetails => !response.ok && response.requestId === failedRunResult.modelCallFailure?.requestId)
+      : undefined;
     const sanitizedFailedRunResult = {
       ...failedRunResult,
-      ...(failedRunResult.modelCallFailure ? { modelCallFailure: sanitizeLeafFailureDetails(failedRunResult.modelCallFailure) } : {}),
+      ...(failedRunResult.modelCallFailure ? { modelCallFailure: localFailure ?? sanitizeLeafFailureDetails(failedRunResult.modelCallFailure) } : {}),
     };
     this.details = {
       ok: false,
       error: { type: "runtime", code: sanitizedFailedRunResult.error.code, message: sanitizedFailedRunResult.error.message },
       failedRunResult: sanitizedFailedRunResult,
       diagnostics: { stderr: summarizeTextDiagnostic(diagnostics.stderr), stdout: summarizeStdoutLines(diagnostics.stdoutLines) },
-      modelCallResponses: modelCallResponses.map((response) => (response.ok ? response : sanitizeLeafFailureDetails(response))),
+      modelCallResponses: modelCallResponses.map((response) => (response.ok ? response : sanitizeLocalLeafFailureDetails(response))),
       finalResults,
     };
   }
@@ -335,7 +338,7 @@ export async function runSyntheticBridge(options: {
           .modelCallRunner(call)
           .then((response) => {
             if (!settled && child.stdin.writable) {
-              const safeResponse = response.ok ? response : sanitizeLeafFailureDetails(response);
+              const safeResponse = response.ok ? response : sanitizeLocalLeafFailureDetails(response);
               modelCallResponses.push({ ...safeResponse, metadata: callbackMetadata });
               void writeBridgeMessage({ type: "model_callback_response", runId: options.runId, ...safeResponse }, "model callback response")
                 .then(() => {
@@ -366,7 +369,7 @@ export async function runSyntheticBridge(options: {
                       },
                       diagnostics: { stdout: "", stderr: "", exitCode: null },
                     };
-              const safeResponse = sanitizeLeafFailureDetails(response);
+              const safeResponse = sanitizeLocalLeafFailureDetails(response);
               modelCallResponses.push({ ...safeResponse, metadata: callbackMetadata });
               void writeBridgeMessage({ type: "model_callback_response", runId: options.runId, ...safeResponse }, "model callback response")
                 .then(() => {
@@ -418,7 +421,7 @@ export async function runSyntheticBridge(options: {
         return;
       }
 
-      fail(protocolError("unknown_stdout_message_type", `Unknown bridge stdout message type: ${String(typed.type)}`, line));
+      fail(protocolError("unknown_stdout_message_type", "Unknown bridge stdout message type.", line));
     });
 
     child.on("error", fail);
