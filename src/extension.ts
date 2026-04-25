@@ -1,5 +1,5 @@
 import { Type } from "typebox";
-import { executeLambdaRlmTool } from "./lambdaRlmTool.js";
+import { executeLambdaRlmTool, LambdaRlmValidationError } from "./lambdaRlmTool.js";
 
 export const LambdaRlmToolParameters = Type.Object(
   {
@@ -43,7 +43,17 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
         content: [{ type: "text", text: "λ-RLM fake bootstrap: validating path input and reading context file internally." }],
         details: { phase: "validate" },
       });
-      return executeLambdaRlmTool(params, { cwd: ctx.cwd });
+      try {
+        return await executeLambdaRlmTool(params, { cwd: ctx.cwd });
+      } catch (error) {
+        if (error instanceof LambdaRlmValidationError) {
+          return {
+            content: [{ type: "text", text: `lambda_rlm validation failed before execution: ${error.details.error.message}` }],
+            details: error.details,
+          };
+        }
+        throw error;
+      }
     },
   });
 }
