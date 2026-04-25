@@ -340,6 +340,8 @@ export async function executeLambdaRlmTool(
           modelCallResponses: error.details.modelCallResponses.map((response) => ({
             ok: response.ok,
             requestId: response.requestId,
+            status: response.ok ? "succeeded" : "failed",
+            ...(response.metadata ? { metadata: response.metadata } : {}),
             ...(response.ok
               ? { stdoutChars: response.diagnostics.stdoutChars }
               : { error: response.error, diagnostics: response.diagnostics }),
@@ -413,11 +415,16 @@ export async function executeLambdaRlmTool(
         metadata: callback.metadata,
         promptChars: callback.prompt.length,
       })),
-      modelCallResponses: bridge.modelCallResponses.map((response) => ({
-        ok: response.ok,
-        requestId: response.requestId,
-        ...(response.ok ? { stdoutChars: response.diagnostics.stdoutChars } : { error: response.error }),
-      })),
+      modelCallResponses: bridge.modelCallResponses.map((response) => {
+        const callback = bridge.modelCallbacks.find((modelCallback) => modelCallback.requestId === response.requestId);
+        return {
+          ok: response.ok,
+          requestId: response.requestId,
+          status: response.ok ? "succeeded" : "failed",
+          ...(callback?.metadata ? { metadata: callback.metadata } : {}),
+          ...(response.ok ? { stdoutChars: response.diagnostics.stdoutChars } : { error: response.error }),
+        };
+      }),
       finalResults: bridge.finalResults.length,
       realLambdaRlm: true,
       childPiLeafCalls: bridge.modelCallResponses.length,

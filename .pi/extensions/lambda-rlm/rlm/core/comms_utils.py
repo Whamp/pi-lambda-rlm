@@ -28,6 +28,7 @@ class LMRequest:
     prompt: str | dict[str, Any] | None = None
     prompts: list[str | dict[str, Any]] | None = None
     model: str | None = None
+    metadata: dict[str, Any] | None = None
     depth: int = 0
 
     @property
@@ -44,6 +45,8 @@ class LMRequest:
             d["prompts"] = self.prompts
         if self.model is not None:
             d["model"] = self.model
+        if self.metadata is not None:
+            d["metadata"] = self.metadata
         d["depth"] = self.depth
         return d
 
@@ -54,6 +57,7 @@ class LMRequest:
             prompt=data.get("prompt"),
             prompts=data.get("prompts"),
             model=data.get("model"),
+            metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else None,
             depth=data.get("depth", -1),  # TODO: Default should throw an error
         )
 

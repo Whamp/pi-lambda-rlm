@@ -14,6 +14,12 @@ from rlm.core.comms_utils import LMRequest, LMResponse, socket_recv, socket_send
 from rlm.core.types import RLMChatCompletion, UsageSummary
 
 
+def _completion_with_optional_metadata(client: BaseLM, prompt, metadata: dict | None) -> str:
+    if metadata is not None and hasattr(client, "completion_with_metadata"):
+        return client.completion_with_metadata(prompt, metadata)
+    return client.completion(prompt)
+
+
 class LMRequestHandler(StreamRequestHandler):
     """Socket handler for LLM completion requests."""
 
@@ -63,7 +69,7 @@ class LMRequestHandler(StreamRequestHandler):
         client = handler.get_client(request.model, request.depth)
 
         start_time = time.perf_counter()
-        content = client.completion(request.prompt)
+        content = _completion_with_optional_metadata(client, request.prompt, request.metadata)
         end_time = time.perf_counter()
 
         model_usage = client.get_last_usage()
@@ -204,9 +210,9 @@ class LMHandler:
             self._server = None
             self._thread = None
 
-    def completion(self, prompt: str, model: str | None = None) -> str:
+    def completion(self, prompt: str, model: str | None = None, metadata: dict | None = None) -> str:
         """Direct completion call (for main process use)."""
-        return self.get_client(model).completion(prompt)
+        return _completion_with_optional_metadata(self.get_client(model), prompt, metadata)
 
     def __enter__(self):
         self.start()

@@ -15,10 +15,10 @@ export type ModelCallbackRequest = {
   runId: string;
   requestId: string;
   prompt: string;
-  metadata?: Record<string, unknown>;
+  metadata: Record<string, unknown>;
 };
 
-export type ModelCallbackResponse = LeafModelCallSuccess | LeafModelCallFailureDetails;
+export type ModelCallbackResponse = (LeafModelCallSuccess | LeafModelCallFailureDetails) & { metadata?: Record<string, unknown> };
 
 export type ModelCallRunner = (call: ModelCall) => Promise<ModelCallbackResponse>;
 
@@ -259,23 +259,29 @@ export async function runSyntheticBridge(options: {
           fail(protocolError("single_in_flight_violation", "Bridge emitted a model callback while another callback was unresolved.", line));
           return;
         }
-        if (typed.runId !== options.runId || typeof typed.requestId !== "string" || typeof typed.prompt !== "string") {
-          fail(protocolError("invalid_model_callback_request", "Bridge model callback request was missing runId, requestId, or prompt.", line));
+        if (
+          typed.runId !== options.runId ||
+          typeof typed.requestId !== "string" ||
+          typeof typed.prompt !== "string" ||
+          typeof typed.metadata !== "object" ||
+          !typed.metadata ||
+          Array.isArray(typed.metadata)
+        ) {
+          fail(protocolError("invalid_model_callback_request", "Bridge model callback request was missing runId, requestId, prompt, or metadata object.", line));
           return;
         }
         pendingCallbackId = typed.requestId;
+        const callbackMetadata = typed.metadata as Record<string, unknown>;
         const call: ModelCall = {
           requestId: typed.requestId,
           prompt: typed.prompt,
           signal: runAbortController.signal,
-          ...(typeof typed.metadata === "object" && typed.metadata && !Array.isArray(typed.metadata)
-            ? { metadata: typed.metadata as Record<string, unknown> }
-            : {}),
+          metadata: callbackMetadata,
         };
         callbacks.push({
           requestId: call.requestId,
           prompt: call.prompt,
-          ...(call.metadata ? { metadata: call.metadata } : {}),
+          metadata: typed.metadata as Record<string, unknown>,
         });
         if (options.maxModelCalls !== undefined && startedModelCalls >= options.maxModelCalls) {
           const response: LeafModelCallFailureDetails = {
@@ -288,7 +294,7 @@ export async function runSyntheticBridge(options: {
             },
             diagnostics: { stdout: "", stderr: "", exitCode: null },
           };
-          modelCallResponses.push(response);
+          modelCallResponses.push({ ...response, metadata: callbackMetadata });
           fail(
             new BridgeRunFailedError(
               {
@@ -311,7 +317,7 @@ export async function runSyntheticBridge(options: {
           .modelCallRunner(call)
           .then((response) => {
             if (!settled && child.stdin.writable) {
-              modelCallResponses.push(response);
+              modelCallResponses.push({ ...response, metadata: callbackMetadata });
               void writeBridgeMessage({ type: "model_callback_response", runId: options.runId, ...response }, "model callback response")
                 .then(() => {
                   pendingCallbackId = undefined;
@@ -341,7 +347,7 @@ export async function runSyntheticBridge(options: {
                       },
                       diagnostics: { stdout: "", stderr: "", exitCode: null },
                     };
-              modelCallResponses.push(response);
+              modelCallResponses.push({ ...response, metadata: callbackMetadata });
               void writeBridgeMessage({ type: "model_callback_response", runId: options.runId, ...response }, "model callback response")
                 .then(() => {
                   pendingCallbackId = undefined;
