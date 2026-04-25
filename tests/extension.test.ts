@@ -8,6 +8,12 @@ function registeredLambdaRlmTool(register: typeof registerLambdaRlmExtension = r
   return tools.find((candidate) => candidate.name === "lambda_rlm");
 }
 
+function registeredLambdaRlmCommand(register: typeof registerLambdaRlmExtension = registerLambdaRlmExtension) {
+  const commands: any[] = [];
+  register({ registerTool: () => undefined, registerCommand: (name: string, options: any) => commands.push({ name, options }) } as any);
+  return commands.find((candidate) => candidate.name === "lambda-rlm-doctor");
+}
+
 describe("lambda_rlm Pi extension registration", () => {
   it("registers a lambda_rlm tool with a strict path-based schema and optional per-run tightening", () => {
     const tool = registeredLambdaRlmTool();
@@ -140,6 +146,28 @@ describe("lambda_rlm Pi extension registration", () => {
       },
       execution: { executionStarted: false, partialDetailsAvailable: false },
     });
+  });
+
+  it("registers a non-mutating doctor command with Pi's two-argument command API", () => {
+    const command = registeredLambdaRlmCommand();
+
+    expect(command).toBeTruthy();
+    expect(command.name).toBe("lambda-rlm-doctor");
+    expect(command.name).not.toMatch(/^\//);
+    expect(command.options.description).toMatch(/non-mutating/i);
+    expect(command.options.description).toMatch(/Python|config|prompts|mock bridge/i);
+    expect(command.options.handler).toEqual(expect.any(Function));
+  });
+
+  it("surfaces the doctor report through the command handler and notifies when Pi UI is available", async () => {
+    const command = registeredLambdaRlmCommand();
+    const notifications: string[] = [];
+
+    const result = await command.options.handler({ cwd: process.cwd(), ui: { notify: (message: string) => notifications.push(message) } });
+
+    expect(result.content[0].text).toMatch(/lambda_rlm doctor (passed|found errors)/);
+    expect(result.details.checks.map((check: any) => check.name)).toContain("mock_bridge");
+    expect(notifications).toEqual([result.content[0].text]);
   });
 
   it("loads the Pi extension entrypoint and registers the lambda_rlm tool", () => {
