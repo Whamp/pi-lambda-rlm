@@ -332,6 +332,34 @@ sys.exit(0)
     });
   });
 
+  it("rejects an oversized contextPath from stat before reading unreadable contents or invoking the bridge", async () => {
+    const contextPath = await tempContextFile("1234567890");
+    await chmod(contextPath, 0o000);
+    let bridgeStarted = false;
+
+    try {
+      const result = await executeLambdaRlmTool(
+        { contextPath, question: "Too large?", maxInputBytes: 9 },
+        {
+          leafProcessRunner: async () => {
+            bridgeStarted = true;
+            return { exitCode: 0, stdout: "", stderr: "" };
+          },
+        },
+      );
+
+      expect(bridgeStarted).toBe(false);
+      expect(result.details).toMatchObject({
+        ok: false,
+        runStatus: "validation_failed",
+        error: { type: "validation", code: "max_input_bytes_exceeded", field: "contextPath" },
+        execution: { executionStarted: false, partialDetailsAvailable: false },
+      });
+    } finally {
+      await chmod(contextPath, 0o600);
+    }
+  });
+
   it("uses per-run output byte and line tightening in the real bridge path", async () => {
     const contextPath = await tempContextFile("short source");
     const fullOutputDir = await mkdtemp(join(tmpdir(), "lambda-rlm-full-output-"));

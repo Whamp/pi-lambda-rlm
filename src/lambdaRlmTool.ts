@@ -94,7 +94,15 @@ export function validateLambdaRlmParams(value: unknown): LambdaRlmParams {
   return { contextPath, question, ...perRun };
 }
 
-async function loadContextFile(contextPath: string, cwd: string) {
+function maxInputBytesError(bytes: number, maxInputBytes: number) {
+  return new LambdaRlmValidationError(
+    "max_input_bytes_exceeded",
+    `contextPath is ${bytes} bytes, exceeding the resolved max_input_bytes limit of ${maxInputBytes}.`,
+    "contextPath",
+  );
+}
+
+async function loadContextFile(contextPath: string, cwd: string, maxInputBytes: number) {
   const normalizedPath = contextPath.startsWith("@") ? contextPath.slice(1) : contextPath;
   const resolvedPath = resolve(cwd, normalizedPath);
 
@@ -103,9 +111,16 @@ async function loadContextFile(contextPath: string, cwd: string) {
     if (!fileStat.isFile()) {
       throw new LambdaRlmValidationError("unreadable_context_path", `contextPath is not a readable file: ${contextPath}`, "contextPath");
     }
+    if (fileStat.size > maxInputBytes) {
+      throw maxInputBytesError(fileStat.size, maxInputBytes);
+    }
 
     const content = await readFile(resolvedPath, "utf8");
-    return { resolvedPath, content, bytes: fileStat.size };
+    const bytes = Buffer.byteLength(content, "utf8");
+    if (bytes > maxInputBytes) {
+      throw maxInputBytesError(bytes, maxInputBytes);
+    }
+    return { resolvedPath, content, bytes };
   } catch (error) {
     if (error instanceof LambdaRlmValidationError) throw error;
     const code = (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing_context_path_file" : "unreadable_context_path";
@@ -179,19 +194,12 @@ export async function executeLambdaRlmTool(
 
   let loaded: Awaited<ReturnType<typeof loadContextFile>>;
   try {
-    loaded = await loadContextFile(validated.contextPath, cwd);
+    loaded = await loadContextFile(validated.contextPath, cwd, runConfig.maxInputBytes);
   } catch (error) {
     if (error instanceof LambdaRlmValidationError) {
       return formatValidationFailure(error.details.error);
     }
     throw error;
-  }
-  if (loaded.bytes > runConfig.maxInputBytes) {
-    return formatValidationFailure({
-      code: "max_input_bytes_exceeded",
-      message: `contextPath is ${loaded.bytes} bytes, exceeding the resolved max_input_bytes limit of ${runConfig.maxInputBytes}.`,
-      field: "contextPath",
-    });
   }
   const sourceMetadata = toSourceMetadata({ path: validated.contextPath, ...loaded });
   const bridgePath = options.bridgePath ?? fileURLToPath(new URL("../.pi/extensions/lambda-rlm/bridge.py", import.meta.url));

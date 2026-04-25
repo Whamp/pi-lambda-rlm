@@ -55,6 +55,8 @@ function stripComment(line: string) {
 export function parseConfigToml(toml: string, source: "global" | "project" = "global"): { ok: true; overlay: Overlay } | { ok: false; error: ConfigValidationError } {
   const overlay: Overlay = {};
   let table: string | undefined;
+  const seenTables = new Set<string>();
+  const seenKeys = new Set<string>();
   const lines = toml.split(/\r?\n/);
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -68,6 +70,10 @@ export function parseConfigToml(toml: string, source: "global" | "project" = "gl
       if (table !== "run") {
         return { ok: false, error: validationError("unknown_config_key", `Unknown TOML table [${table}] in ${source} config. Only [run] is supported.`, `[${table}]`) };
       }
+      if (seenTables.has(table)) {
+        return { ok: false, error: validationError("invalid_toml", `Duplicate TOML table [${table}] in ${source} config at line ${lineNumber}.`, `[${table}]`) };
+      }
+      seenTables.add(table);
       continue;
     }
 
@@ -84,6 +90,10 @@ export function parseConfigToml(toml: string, source: "global" | "project" = "gl
     if (!configKey) {
       return { ok: false, error: validationError("unknown_config_key", `Unknown [run] key ${tomlKey}. Supported keys: max_input_bytes, output_max_bytes, output_max_lines.`, `run.${tomlKey}`) };
     }
+    if (seenKeys.has(tomlKey)) {
+      return { ok: false, error: validationError("invalid_toml", `Duplicate [run] key ${tomlKey} in ${source} config at line ${lineNumber}.`, `run.${tomlKey}`) };
+    }
+    seenKeys.add(tomlKey);
 
     const value = Number(assignment[2]);
     if (!Number.isSafeInteger(value) || value <= 0) {

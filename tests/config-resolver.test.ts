@@ -65,6 +65,8 @@ describe("TOML run config resolver", () => {
     ["unknown_key", "[run]\nmax_input_bytes = 100\nextra = 1\n", "unknown_config_key"],
     ["invalid_value", "[run]\nmax_input_bytes = 0\n", "invalid_config_value"],
     ["unknown_table", "[prompt]\nfoo = 1\n", "unknown_config_key"],
+    ["duplicate_key", "[run]\nmax_input_bytes = 100\nmax_input_bytes = 90\n", "invalid_toml"],
+    ["duplicate_table", "[run]\nmax_input_bytes = 100\n[run]\noutput_max_bytes = 90\n", "invalid_toml"],
   ])("returns structured validation errors for %s", async (_name, toml, code) => {
     const dirs = await tempConfigDirs();
     await writeToml(dirs.globalConfigPath, toml);
