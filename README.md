@@ -155,10 +155,26 @@ python3 -m unittest discover -s tests/python -v
 python3 -m py_compile .pi/extensions/lambda-rlm/bridge.py $(find .pi/extensions/lambda-rlm/rlm -name '*.py' -type f | sort)
 ```
 
-## Pi extension entrypoint
+## Pi extension entrypoint and dogfooding
 
-The project-local Pi extension entrypoint is:
+This repo intentionally includes a project-local Pi extension entrypoint:
 
 ```text
 .pi/extensions/lambda-rlm/index.ts
 ```
+
+Pi auto-discovers `.pi/extensions/*/index.ts` when a Pi coding agent starts in this repository. That means `lambda_rlm` is registered as an available tool even when it has not been installed globally.
+
+This is intentional dogfooding for extension development: ordinary Pi sessions in this repo exercise the same registration path users will hit later, so schema and runtime problems show up early.
+
+The entrypoint is not a symlink. It re-exports the source implementation:
+
+```ts
+export { default } from "../../../src/extension.js";
+```
+
+So edits to `src/extension.ts` are picked up by the project-local extension after `/reload` or a Pi restart. Runtime assets such as `bridge.py`, `prompts/`, `prompt-templates/`, and the vendored `rlm/` package live under `.pi/extensions/lambda-rlm/` as tracked repo files.
+
+Important gotcha: Pi sends registered tool schemas to the active model provider before the agent can answer a prompt. Therefore an invalid `lambda_rlm` schema can break unrelated requests in this repo even if the agent never calls the tool. Keep public tool schemas provider-compatible: top-level object schemas only, with conditional rules enforced in runtime validation.
+
+To bypass the dogfooded extension while debugging unrelated work, start Pi with extensions disabled or temporarily rename `.pi/extensions/lambda-rlm/`.

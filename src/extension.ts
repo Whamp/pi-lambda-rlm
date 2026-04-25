@@ -45,10 +45,6 @@ export const LambdaRlmToolParameters = Type.Object(
   },
   {
     additionalProperties: false,
-    oneOf: [
-      { required: ["contextPath", "question"], not: { required: ["contextPaths"] } },
-      { required: ["contextPaths", "question"], not: { required: ["contextPath"] } },
-    ],
   },
 );
 

@@ -2,10 +2,63 @@ import { describe, expect, it } from "vitest";
 import registerLambdaRlmExtension from "../src/extension.js";
 import registerLambdaRlmEntrypoint from "../.pi/extensions/lambda-rlm/index.js";
 
+type RegisteredTool = {
+  name: string;
+  parameters: any;
+  description: string;
+  promptGuidelines?: string[];
+  execute: (...args: any[]) => Promise<any>;
+};
+
+const FORBIDDEN_TOP_LEVEL_SCHEMA_KEYS = ["oneOf", "anyOf", "allOf", "enum", "not"] as const;
+const FORBIDDEN_SCHEMA_COMBINATORS = ["oneOf", "anyOf", "allOf", "not"] as const;
+
+function registeredTools(register: typeof registerLambdaRlmExtension = registerLambdaRlmExtension) {
+  const tools: RegisteredTool[] = [];
+  register({ registerTool: (tool: RegisteredTool) => tools.push(tool) } as any);
+  return tools;
+}
+
 function registeredLambdaRlmTool(register: typeof registerLambdaRlmExtension = registerLambdaRlmExtension) {
-  const tools: any[] = [];
-  register({ registerTool: (tool: any) => tools.push(tool) } as any);
-  return tools.find((candidate) => candidate.name === "lambda_rlm");
+  const tool = registeredTools(register).find((candidate) => candidate.name === "lambda_rlm");
+  if (!tool) throw new Error("lambda_rlm tool was not registered");
+  return tool;
+}
+
+function findForbiddenSchemaCombinators(schema: unknown, path = "$." ): string[] {
+  if (!schema || typeof schema !== "object") return [];
+  if (Array.isArray(schema)) return schema.flatMap((item, index) => findForbiddenSchemaCombinators(item, `${path}[${index}].`));
+
+  const record = schema as Record<string, unknown>;
+  const problems: string[] = [];
+  for (const keyword of FORBIDDEN_SCHEMA_COMBINATORS) {
+    if (keyword in record) problems.push(`${path}${keyword}`);
+  }
+  for (const [key, value] of Object.entries(record)) {
+    problems.push(...findForbiddenSchemaCombinators(value, `${path}${key}.`));
+  }
+  return problems;
+}
+
+function schemaCompatibilityProblems(tool: RegisteredTool): string[] {
+  const schema = tool.parameters;
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return [`${tool.name}: parameters schema must be an object`];
+  }
+
+  const record = schema as Record<string, unknown>;
+  const problems: string[] = [];
+  if (record.type !== "object") {
+    problems.push(`${tool.name}: top-level schema type must be "object"; got ${JSON.stringify(record.type)}`);
+  }
+  for (const keyword of FORBIDDEN_TOP_LEVEL_SCHEMA_KEYS) {
+    if (keyword in record) problems.push(`${tool.name}: top-level schema must not contain ${keyword}`);
+  }
+  const combinators = findForbiddenSchemaCombinators(record);
+  if (combinators.length > 0) {
+    problems.push(`${tool.name}: schema must not contain JSON Schema combinators (${combinators.join(", ")})`);
+  }
+  return problems;
 }
 
 function registeredLambdaRlmCommand(register: typeof registerLambdaRlmExtension = registerLambdaRlmExtension) {
@@ -47,6 +100,21 @@ describe("lambda_rlm Pi extension registration", () => {
       "question",
       "wholeRunTimeoutMs",
     ]);
+  });
+
+  it("registers only provider-compatible tool schemas", () => {
+    const registrations = [
+      { source: "src/extension.ts", tools: registeredTools(registerLambdaRlmExtension) },
+      { source: ".pi/extensions/lambda-rlm/index.ts", tools: registeredTools(registerLambdaRlmEntrypoint) },
+    ];
+
+    const incompatibleSchemas = registrations.flatMap((registration) =>
+      registration.tools
+        .map((tool) => ({ source: registration.source, name: tool.name, problems: schemaCompatibilityProblems(tool) }))
+        .filter((tool) => tool.problems.length > 0),
+    );
+
+    expect(incompatibleSchemas).toEqual([]);
   });
 
   it("describes the public tool as the real path-based Lambda-RLM integration", async () => {
