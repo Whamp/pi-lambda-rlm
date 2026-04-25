@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runSyntheticBridge } from "./bridgeRunner.js";
+import { BridgeRunFailedError, runSyntheticBridge } from "./bridgeRunner.js";
 import { runFormalPiLeafModelCall, type LeafThinking, type ProcessRunner } from "./leafRunner.js";
 
 const ALLOWED_KEYS = new Set(["contextPath", "question"]);
@@ -18,6 +18,20 @@ export type LambdaRlmToolResult = {
   content: TextContent[];
   details: Record<string, unknown>;
 };
+
+export class LambdaRlmRuntimeError extends Error {
+  readonly details: {
+    ok: false;
+    error: { type: "runtime"; code: string; message: string };
+    bridgeRun: Record<string, unknown>;
+  };
+
+  constructor(details: LambdaRlmRuntimeError["details"]) {
+    super(details.error.message);
+    this.name = "LambdaRlmRuntimeError";
+    this.details = details;
+  }
+}
 
 export class LambdaRlmValidationError extends Error {
   readonly details: {
@@ -123,22 +137,55 @@ export async function executeLambdaRlmTool(
   const leafModel = options.leafModel ?? process.env.LAMBDA_RLM_LEAF_MODEL ?? "google/gemini-3-flash-preview";
   const leafThinking = options.leafThinking ?? "off";
 
-  const bridge = await runSyntheticBridge({
-    bridgePath,
-    runId,
-    contextPath: loaded.resolvedPath,
-    question: validated.question,
-    modelCallRunner: (call) =>
-      runFormalPiLeafModelCall(call, {
-        ...(options.piExecutable ? { piExecutable: options.piExecutable } : {}),
-        leafModel,
-        leafThinking,
-        ...(options.leafTimeoutMs !== undefined ? { timeoutMs: options.leafTimeoutMs } : {}),
-        ...(options.leafProcessRunner ? { processRunner: options.leafProcessRunner } : {}),
-        ...(options.signal ? { signal: options.signal } : {}),
-      }),
-    ...(options.signal ? { signal: options.signal } : {}),
-  });
+  let bridge;
+  try {
+    bridge = await runSyntheticBridge({
+      bridgePath,
+      runId,
+      contextPath: loaded.resolvedPath,
+      question: validated.question,
+      modelCallRunner: (call) =>
+        runFormalPiLeafModelCall(call, {
+          ...(options.piExecutable ? { piExecutable: options.piExecutable } : {}),
+          leafModel,
+          leafThinking,
+          ...(options.leafTimeoutMs !== undefined ? { timeoutMs: options.leafTimeoutMs } : {}),
+          ...(options.leafProcessRunner ? { processRunner: options.leafProcessRunner } : {}),
+          ...(options.signal ? { signal: options.signal } : {}),
+        }),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+  } catch (error) {
+    if (error instanceof BridgeRunFailedError) {
+      throw new LambdaRlmRuntimeError({
+        ok: false,
+        error: error.details.error,
+        bridgeRun: {
+          executionStarted: true,
+          pythonBridge: true,
+          protocol: "strict-stdout-stdin-ndjson",
+          runId,
+          stdoutProtocolLines: error.details.diagnostics.stdoutLines.length,
+          stderrDiagnosticsChars: error.details.diagnostics.stderr.length,
+          modelCallResponses: error.details.modelCallResponses.map((response) => ({
+            ok: response.ok,
+            requestId: response.requestId,
+            ...(response.ok
+              ? { stdoutChars: response.diagnostics.stdoutChars }
+              : { error: response.error, diagnostics: response.diagnostics }),
+          })),
+          failedRunResult: error.details.failedRunResult,
+          finalResults: 1,
+          realLambdaRlm: false,
+          childPiLeafCalls: error.details.modelCallResponses.length,
+          leafProfile: "formal_pi_print",
+          leafModel,
+          leafThinking,
+        },
+      });
+    }
+    throw error;
+  }
 
   const rawAnswer = [
     "Synthetic λ-RLM bridge answer",

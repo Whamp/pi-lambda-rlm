@@ -100,19 +100,21 @@ def main() -> int:
     if response.get("ok") is False:
         error = response.get("error") if isinstance(response.get("error"), dict) else {}
         message = error.get("message") if isinstance(error, dict) else None
-        emit_stdout(
-            {
-                "type": "run_result",
-                "runId": run_id,
-                "ok": False,
-                "error": {
-                    "type": "model_callback_failure",
-                    "code": "model_callback_failed",
-                    "message": message if isinstance(message, str) else "Model callback failed.",
-                },
-                "modelCalls": 1,
-            }
-        )
+        failure_result = {
+            "type": "run_result",
+            "runId": run_id,
+            "ok": False,
+            "error": {
+                "type": "model_callback_failure",
+                "code": "model_callback_failed",
+                "message": message if isinstance(message, str) else "Model callback failed.",
+            },
+            "modelCalls": 1,
+        }
+        # Preserve structured child process diagnostics from the model callback response.
+        # The TypeScript tool turns this failed run_result into caller-visible failure details.
+        failure_result["modelCallFailure"] = response
+        emit_stdout(failure_result)
         return 0
     if response.get("ok") is not True or not isinstance(response.get("content"), str):
         error_result(run_id, "invalid_model_callback_response", "model_callback_response must be ok with string content.")

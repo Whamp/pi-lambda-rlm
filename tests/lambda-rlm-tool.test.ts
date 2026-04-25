@@ -75,6 +75,62 @@ describe("synthetic bridge lambda_rlm tool execution", () => {
     );
   });
 
+  it("returns a structured runtime failure with child process diagnostics when the constrained leaf process exits non-zero", async () => {
+    const contextPath = await tempContextFile("context that is read internally");
+
+    await expect(
+      executeLambdaRlmTool(
+        { contextPath, question: "What fails?" },
+        {
+          leafModel: "google/gemini-test",
+          leafProcessRunner: async () => ({
+            exitCode: 7,
+            stdout: "leaf stdout before failure",
+            stderr: "leaf stderr auth failure",
+            signal: null,
+          }),
+        },
+      ),
+    ).rejects.toMatchObject({
+      details: {
+        ok: false,
+        error: {
+          type: "runtime",
+          code: "model_callback_failed",
+          message: expect.stringContaining("Child pi leaf process exited with code 7"),
+        },
+        bridgeRun: {
+          executionStarted: true,
+          pythonBridge: true,
+          modelCallResponses: [
+            {
+              ok: false,
+              requestId: "model-call-1",
+              error: { type: "child_process", code: "child_exit_nonzero" },
+              diagnostics: {
+                stdout: "leaf stdout before failure",
+                stderr: "leaf stderr auth failure",
+                exitCode: 7,
+                signal: null,
+              },
+            },
+          ],
+          failedRunResult: {
+            error: { type: "model_callback_failure", code: "model_callback_failed" },
+            modelCallFailure: {
+              diagnostics: {
+                stdout: "leaf stdout before failure",
+                stderr: "leaf stderr auth failure",
+                exitCode: 7,
+                signal: null,
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+
   it.each([
     [{}, "missing_context_path"],
     [{ contextPath: "", question: "What?" }, "missing_context_path"],

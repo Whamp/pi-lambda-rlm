@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import type { LeafModelCallFailureDetails, LeafModelCallSuccess, ModelCall } from "./leafRunner.js";
+import { LeafProcessFailure, type LeafModelCallFailureDetails, type LeafModelCallSuccess, type ModelCall } from "./leafRunner.js";
 
 export type BridgeRunRequest = {
   type: "run_request";
@@ -28,6 +28,15 @@ export type BridgeRunResult = {
   modelCalls: number;
 };
 
+export type BridgeFailedRunResult = {
+  type: "run_result";
+  runId: string;
+  ok: false;
+  error: { type: string; code: string; message: string };
+  modelCalls?: number;
+  modelCallFailure?: LeafModelCallFailureDetails;
+};
+
 export type CompletedSyntheticBridgeRun = BridgeRunResult & {
   modelCallbacks: Array<Omit<ModelCallbackRequest, "type" | "runId">>;
   modelCallResponses: ModelCallbackResponse[];
@@ -35,6 +44,45 @@ export type CompletedSyntheticBridgeRun = BridgeRunResult & {
   stdoutLines: string[];
   stderr: string;
 };
+
+export class BridgeRunFailedError extends Error {
+  readonly details: {
+    ok: false;
+    error: { type: "runtime"; code: string; message: string };
+    failedRunResult: BridgeFailedRunResult;
+    diagnostics: { stderr: string; stdoutLines: string[] };
+    modelCallResponses: ModelCallbackResponse[];
+  };
+
+  constructor(failedRunResult: BridgeFailedRunResult, diagnostics: { stderr: string; stdoutLines: string[] }, modelCallResponses: ModelCallbackResponse[]) {
+    super(failedRunResult.error.message);
+    this.name = "BridgeRunFailedError";
+    this.details = {
+      ok: false,
+      error: { type: "runtime", code: failedRunResult.error.code, message: failedRunResult.error.message },
+      failedRunResult,
+      diagnostics,
+      modelCallResponses,
+    };
+  }
+}
+
+function isLeafModelCallFailureDetails(value: unknown): value is LeafModelCallFailureDetails {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const diagnostics = record.diagnostics as Record<string, unknown> | undefined;
+  return (
+    record.ok === false &&
+    typeof record.requestId === "string" &&
+    typeof record.error === "object" &&
+    !!record.error &&
+    typeof diagnostics === "object" &&
+    !!diagnostics &&
+    typeof diagnostics.stdout === "string" &&
+    typeof diagnostics.stderr === "string" &&
+    (typeof diagnostics.exitCode === "number" || diagnostics.exitCode === null)
+  );
+}
 
 export class BridgeProtocolError extends Error {
   readonly details: {
@@ -142,13 +190,19 @@ export async function runSyntheticBridge(options: {
           })
           .catch((error: unknown) => {
             if (!settled && child.stdin.writable) {
-              const message = error instanceof Error ? error.message : String(error);
-              const response: LeafModelCallFailureDetails = {
-                ok: false,
-                requestId: call.requestId,
-                error: { type: "child_process", code: "model_call_runner_error", message },
-                diagnostics: { stdout: "", stderr: "", exitCode: null },
-              };
+              const response: LeafModelCallFailureDetails =
+                error instanceof LeafProcessFailure
+                  ? error.details
+                  : {
+                      ok: false,
+                      requestId: call.requestId,
+                      error: {
+                        type: "child_process",
+                        code: "model_call_runner_error",
+                        message: error instanceof Error ? error.message : String(error),
+                      },
+                      diagnostics: { stdout: "", stderr: "", exitCode: null },
+                    };
               modelCallResponses.push(response);
               child.stdin.write(JSON.stringify({ type: "model_callback_response", runId: options.runId, ...response }) + "\n");
               pendingCallbackId = undefined;
@@ -160,13 +214,19 @@ export async function runSyntheticBridge(options: {
       if (typed.type === "run_result") {
         if (typed.ok === false) {
           const error = typed.error as Record<string, unknown> | undefined;
-          fail(
-            protocolError(
-              "bridge_run_failed",
-              typeof error?.message === "string" ? error.message : "Bridge returned a structured failure result.",
-              line,
-            ),
-          );
+          const failedRunResult: BridgeFailedRunResult = {
+            type: "run_result",
+            runId: typeof typed.runId === "string" ? typed.runId : options.runId,
+            ok: false,
+            error: {
+              type: typeof error?.type === "string" ? error.type : "runtime",
+              code: typeof error?.code === "string" ? error.code : "bridge_run_failed",
+              message: typeof error?.message === "string" ? error.message : "Bridge returned a structured failure result.",
+            },
+            ...(typeof typed.modelCalls === "number" ? { modelCalls: typed.modelCalls } : {}),
+            ...(isLeafModelCallFailureDetails(typed.modelCallFailure) ? { modelCallFailure: typed.modelCallFailure } : {}),
+          };
+          fail(new BridgeRunFailedError(failedRunResult, { stderr, stdoutLines }, modelCallResponses));
           return;
         }
         if (typed.ok !== true || typed.runId !== options.runId || typeof typed.content !== "string") {

@@ -53,8 +53,22 @@ describe("Python NDJSON bridge runner", () => {
         }),
       }),
     ).rejects.toMatchObject({
-      name: "BridgeProtocolError",
-      details: { error: { code: "bridge_run_failed", message: expect.stringContaining("child failed") } },
+      name: "BridgeRunFailedError",
+      details: {
+        error: { type: "runtime", code: "model_callback_failed", message: expect.stringContaining("child failed") },
+        failedRunResult: {
+          error: { type: "model_callback_failure", code: "model_callback_failed" },
+          modelCallFailure: {
+            diagnostics: { stdout: "", stderr: "bad auth", exitCode: 1 },
+          },
+        },
+        modelCallResponses: [
+          {
+            ok: false,
+            diagnostics: { stdout: "", stderr: "bad auth", exitCode: 1 },
+          },
+        ],
+      },
     });
   });
 
