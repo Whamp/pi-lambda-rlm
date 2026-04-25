@@ -346,6 +346,27 @@ sys.exit(0)
     });
   });
 
+  it("returns a structured runtime failure without source contents when a large assembled request hits a bridge that exits before reading stdin", async () => {
+    const secretContent = `SECRET_LARGE_STDIN_SOURCE_${"x".repeat(256 * 1024)}`;
+    const firstPath = await tempContextFile(secretContent);
+    const secondPath = await tempContextFile("small second source keeps contextPaths assembly active");
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import sys
+sys.stderr.write("bridge exiting before stdin read\\n")
+sys.stderr.flush()
+sys.exit(0)
+`);
+
+    const result = await executeLambdaRlmTool({ contextPaths: [firstPath, secondPath], question: "What happened?" }, { bridgePath });
+
+    expect(result.content[0]).toMatchObject({ type: "text" });
+    const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+    expect(text).toContain("lambda_rlm runtime failed");
+    expect(result.details).toMatchObject({ ok: false, error: { type: "runtime", code: "bridge_stdin_write_failed" } });
+    expect(JSON.stringify(result.details)).not.toContain("SECRET_LARGE_STDIN_SOURCE_");
+    expect(text).not.toContain("SECRET_LARGE_STDIN_SOURCE_");
+  });
+
   it("enforces resolved max input bytes from TOML config before starting the real bridge path", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "lambda-rlm-project-config-"));
     const configPath = join(cwd, ".pi", "lambda-rlm", "config.toml");
