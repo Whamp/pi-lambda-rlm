@@ -1,0 +1,29 @@
+# Local editor/OS files
+.DS_Store
+*.swp
+*.swo
+
+# Node/TypeScript artifacts
+node_modules/
+dist/
+build/
+coverage/
+.nyc_output/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Local agent/worktree artifacts
+.worktrees/
+.env
+.env.*
+
+# Logs
+*.log
