@@ -36,7 +36,7 @@ async function boundVisibleOutput(text: string, options: OutputLimitOptions = {}
     return { text, truncated: false, maxVisibleChars, visibleChars: text.length };
   }
 
-  const suffix = "\n[Lambda-RLM output truncated to stay within tool bounds. Full output was written to the path in details.output.fullOutputPath when configured.]";
+  const suffix = "\n[Lambda-RLM output truncated; full output path is in details.output.fullOutputPath when configured.]";
   const sliceAt = Math.max(0, maxVisibleChars - suffix.length);
   let fullOutputPath: string | undefined;
   if (options.fullOutputDir) {
@@ -69,10 +69,10 @@ export async function formatSuccessResult(args: {
   output?: OutputLimitOptions;
 }) {
   const rawVisible = [
-    args.answer,
-    "",
-    `Run summary: Real Lambda-RLM completed over 1 source (${args.source.chars} characters, ${args.source.lines} lines).`,
+    `Run summary: Real Lambda-RLM completed; source chars=${args.source.chars}, lines=${args.source.lines}.`,
     `Model calls: ${String(args.modelCallSummary.total ?? 0)}.`,
+    "",
+    args.answer,
   ].join("\n");
   const bounded = await boundVisibleOutput(rawVisible, args.output);
   return {

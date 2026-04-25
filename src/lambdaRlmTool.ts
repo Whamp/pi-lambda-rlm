@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BridgeRunFailedError, runSyntheticBridge } from "./bridgeRunner.js";
+import { BridgeProtocolError, BridgeRunFailedError, runSyntheticBridge } from "./bridgeRunner.js";
 import { runFormalPiLeafModelCall, type LeafThinking, type ProcessRunner } from "./leafRunner.js";
 import {
   DEFAULT_VISIBLE_OUTPUT_LIMIT,
@@ -204,6 +204,34 @@ export async function executeLambdaRlmTool(
           finalResults: 1,
           realLambdaRlm: true,
           childPiLeafCalls: error.details.modelCallResponses.length,
+          leafProfile: "formal_pi_print",
+          leafModel,
+          leafThinking,
+        },
+        output: outputOptions,
+      });
+    }
+    if (error instanceof BridgeProtocolError) {
+      return formatRuntimeFailure({
+        error: error.details.error,
+        source: sourceMetadata,
+        question: validated.question,
+        partialBridgeRun: {
+          executionStarted: true,
+          partialDetailsAvailable: true,
+          pythonBridge: true,
+          protocol: "strict-stdout-stdin-ndjson",
+          runId,
+          stdoutProtocolLines: error.details.diagnostics.stdoutLines.length,
+          stderrDiagnosticsChars: error.details.diagnostics.stderr.length,
+          protocolError: {
+            code: error.details.error.code,
+            message: error.details.error.message,
+            ...(error.details.error.line ? { stdoutLine: error.details.error.line } : {}),
+          },
+          finalResults: 0,
+          realLambdaRlm: true,
+          childPiLeafCalls: 0,
           leafProfile: "formal_pi_print",
           leafModel,
           leafThinking,

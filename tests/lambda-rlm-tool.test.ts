@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -8,6 +8,14 @@ async function tempContextFile(content: string) {
   const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-test-"));
   const path = join(dir, "context.txt");
   await writeFile(path, content, "utf8");
+  return path;
+}
+
+async function tempPythonBridgeScript(source: string) {
+  const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-bridge-script-"));
+  const path = join(dir, "bridge.py");
+  await writeFile(path, source, "utf8");
+  await chmod(path, 0o755);
   return path;
 }
 
@@ -203,7 +211,76 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
     expect(result.details).not.toHaveProperty("partialRun");
   });
 
-  it("truncates long visible output deterministically and writes recoverable full output when configured", async () => {
+  it("returns a structured runtime failure when the bridge emits malformed stdout after execution starts", async () => {
+    const contextPath = await tempContextFile("context read before malformed bridge output");
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import sys
+sys.stdin.readline()
+sys.stderr.write("bridge diagnostic before malformed stdout\\n")
+sys.stderr.flush()
+print("{not json", flush=True)
+`);
+
+    const result = await executeLambdaRlmTool({ contextPath, question: "What happened?" }, { bridgePath });
+
+    expect(result.content[0]!.text).toContain("No authoritative answer is available");
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "runtime_failed",
+      answer: null,
+      authoritativeAnswerAvailable: false,
+      error: {
+        type: "protocol",
+        code: "malformed_stdout_json",
+        message: expect.stringContaining("Bridge stdout line was not valid JSON"),
+      },
+      partialRun: {
+        executionStarted: true,
+        partialDetailsAvailable: true,
+        pythonBridge: true,
+        protocol: "strict-stdout-stdin-ndjson",
+        stdoutProtocolLines: 1,
+        stderrDiagnosticsChars: expect.any(Number),
+        protocolError: {
+          code: "malformed_stdout_json",
+          stdoutLine: "{not json",
+        },
+      },
+    });
+  });
+
+  it("returns a structured runtime failure when the bridge exits without a final result", async () => {
+    const contextPath = await tempContextFile("context read before missing bridge result");
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import sys
+sys.stdin.readline()
+sys.stderr.write("bridge exited before final result\\n")
+sys.stderr.flush()
+sys.exit(0)
+`);
+
+    const result = await executeLambdaRlmTool({ contextPath, question: "What happened?" }, { bridgePath });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "runtime_failed",
+      answer: null,
+      authoritativeAnswerAvailable: false,
+      error: {
+        type: "protocol",
+        code: "missing_final_result",
+      },
+      partialRun: {
+        executionStarted: true,
+        partialDetailsAvailable: true,
+        pythonBridge: true,
+        stdoutProtocolLines: 0,
+        finalResults: 0,
+      },
+    });
+  });
+
+  it("truncates long visible output deterministically, preserves the compact run summary, and writes recoverable full output when configured", async () => {
     const contextPath = await tempContextFile("short source");
     const fullOutputDir = await mkdtemp(join(tmpdir(), "lambda-rlm-full-output-"));
     const longAnswer = `ANSWER-${"x".repeat(500)}`;
@@ -211,7 +288,7 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
     const result = await executeLambdaRlmTool(
       { contextPath, question: "Produce long output" },
       {
-        outputMaxVisibleChars: 160,
+        outputMaxVisibleChars: 180,
         fullOutputDir,
         leafProcessRunner: async (invocation) => {
           const promptFile = invocation.args.at(-1);
@@ -221,9 +298,11 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
       },
     );
 
-    expect(result.content[0]!.text.length).toBeLessThanOrEqual(160);
+    expect(result.content[0]!.text.length).toBeLessThanOrEqual(180);
     expect(result.content[0]!.text).toContain("truncated");
-    expect(result.details).toMatchObject({ ok: true, output: { truncated: true, maxVisibleChars: 160 } });
+    expect(result.content[0]!.text).toContain("Run summary: Real Lambda-RLM completed");
+    expect(result.content[0]!.text).toContain("Model calls:");
+    expect(result.details).toMatchObject({ ok: true, output: { truncated: true, maxVisibleChars: 180 } });
     const fullOutputPath = (result.details.output as any).fullOutputPath;
     expect(fullOutputPath).toEqual(expect.stringContaining(fullOutputDir));
     await expect(readFile(fullOutputPath, "utf8")).resolves.toContain(longAnswer);
