@@ -170,24 +170,105 @@ def _render_angle_template(template: str, values: dict[str, str], *, allowed: se
 
 @dataclass(frozen=True)
 class LambdaPromptRegistry:
-    qa_template: str = "Using the following context, answer: <<query>>\n\nContext:\n<<text>>"
+    task_detection_prompt: str = """\
+Based on the metadata below, select the single most appropriate task type.
+
+Metadata: <<metadata>>
+
+Reply with ONLY a single digit (no other text):
+1. summarization - condense/summarize content
+2. qa - answer a question using context
+3. translation - translate text
+4. classification - categorize/label text
+5. extraction - extract specific facts or entities
+6. analysis - deep analysis or evaluation
+7. general - mixed or other
+
+Single digit:"""
+    task_templates: dict[TaskType, str] | None = None
+    filter_relevance_prompt: str = FILTER_RELEVANCE_TEMPLATE.replace("{query}", "<<query>>").replace("{preview}", "<<preview>>")
+    reducer_prompts: dict[ComposeOp, str] | None = None
+
+    @classmethod
+    def default_task_templates(cls) -> dict[TaskType, str]:
+        return {
+            TaskType.SUMMARIZATION: "Summarize the following text concisely:\n\n<<text>>",
+            TaskType.QA: "Using the following context, answer: <<query>>\n\nContext:\n<<text>>",
+            TaskType.TRANSLATION: "Translate the following text:\n\n<<text>>",
+            TaskType.CLASSIFICATION: "Classify the following text:\n\n<<text>>",
+            TaskType.EXTRACTION: "Extract all key information from:\n\n<<text>>",
+            TaskType.ANALYSIS: "Analyze the following text and provide insights:\n\n<<text>>",
+            TaskType.GENERAL: "Process the following and provide a response:\n\n<<text>>",
+        }
+
+    @classmethod
+    def default_reducer_prompts(cls) -> dict[ComposeOp, str]:
+        return {
+            ComposeOp.MERGE_SUMMARIES: "Merge these partial summaries into one concise, coherent summary. Preserve all key facts and findings:\n\n<<parts>>",
+            ComposeOp.SELECT_RELEVANT: "Question: <<query>>\n\nSynthesise these partial answers into one complete, accurate answer:\n\n<<parts>>",
+            ComposeOp.COMBINE_ANALYSIS: "Combine these partial analyses into one comprehensive, well-structured analysis:\n\n<<parts>>",
+        }
 
     @classmethod
     def from_bridge_bundle(cls, bundle: dict[str, Any] | None) -> "LambdaPromptRegistry":
-        if not isinstance(bundle, dict):
-            return cls()
-        prompts = bundle.get("prompts") if isinstance(bundle.get("prompts"), dict) else {}
-        qa = prompts.get("tasks/qa.md") if isinstance(prompts, dict) else None
-        template = qa.get("template") if isinstance(qa, dict) and isinstance(qa.get("template"), str) else cls().qa_template
-        registry = cls(qa_template=template)
+        task_templates = cls.default_task_templates()
+        reducer_prompts = cls.default_reducer_prompts()
+        task_detection = cls().task_detection_prompt
+        filter_relevance = cls().filter_relevance_prompt
+        if isinstance(bundle, dict):
+            prompts = bundle.get("prompts") if isinstance(bundle.get("prompts"), dict) else {}
+            def template_for(key: str, fallback: str) -> str:
+                item = prompts.get(key) if isinstance(prompts, dict) else None
+                return item.get("template") if isinstance(item, dict) and isinstance(item.get("template"), str) else fallback
+            task_detection = template_for("TASK-DETECTION-PROMPT.md", task_detection)
+            for task_type in TaskType:
+                task_templates[task_type] = template_for(f"tasks/{task_type.value}.md", task_templates[task_type])
+            filter_relevance = template_for("filters/relevance.md", filter_relevance)
+            reducer_prompts[ComposeOp.MERGE_SUMMARIES] = template_for("reducers/merge-summaries.md", reducer_prompts[ComposeOp.MERGE_SUMMARIES])
+            reducer_prompts[ComposeOp.SELECT_RELEVANT] = template_for("reducers/select-relevant.md", reducer_prompts[ComposeOp.SELECT_RELEVANT])
+            reducer_prompts[ComposeOp.COMBINE_ANALYSIS] = template_for("reducers/combine-analysis.md", reducer_prompts[ComposeOp.COMBINE_ANALYSIS])
+        registry = cls(
+            task_detection_prompt=task_detection,
+            task_templates=task_templates,
+            filter_relevance_prompt=filter_relevance,
+            reducer_prompts=reducer_prompts,
+        )
         registry.validate()
         return registry
 
+    def _tasks(self) -> dict[TaskType, str]:
+        return self.task_templates or self.default_task_templates()
+
+    def _reducers(self) -> dict[ComposeOp, str]:
+        return self.reducer_prompts or self.default_reducer_prompts()
+
     def validate(self) -> None:
-        self.render_qa(text="", query="")
+        self.render_task_detection(metadata="")
+        for task_type in TaskType:
+            self.render_task(task_type, text="", query="")
+        self.render_filter_relevance(query="", preview="")
+        self.render_reducer(ComposeOp.MERGE_SUMMARIES, parts="", query="")
+        self.render_reducer(ComposeOp.SELECT_RELEVANT, parts="", query="")
+        self.render_reducer(ComposeOp.COMBINE_ANALYSIS, parts="", query="")
+
+    def render_task_detection(self, *, metadata: str) -> str:
+        return _render_angle_template(self.task_detection_prompt, {"metadata": metadata}, allowed={"metadata"}, required={"metadata"})
+
+    def render_task(self, task_type: TaskType, *, text: str, query: str = "") -> str:
+        required = {"text", "query"} if task_type == TaskType.QA else {"text"}
+        return _render_angle_template(self._tasks()[task_type], {"text": text, "query": query}, allowed={"text", "query"}, required=required)
 
     def render_qa(self, *, text: str, query: str) -> str:
-        return _render_angle_template(self.qa_template, {"text": text, "query": query}, allowed={"text", "query"}, required={"text", "query"})
+        return self.render_task(TaskType.QA, text=text, query=query)
+
+    def render_filter_relevance(self, *, query: str, preview: str) -> str:
+        return _render_angle_template(self.filter_relevance_prompt, {"query": query, "preview": preview}, allowed={"query", "preview"}, required={"query", "preview"})
+
+    def render_reducer(self, compose_op: ComposeOp, *, parts: str, query: str = "") -> str:
+        if compose_op not in self._reducers():
+            raise ValueError(f"No LLM reducer prompt for compose op: {compose_op.value}")
+        required = {"parts", "query"} if compose_op == ComposeOp.SELECT_RELEVANT else {"parts"}
+        return _render_angle_template(self._reducers()[compose_op], {"parts": parts, "query": query}, allowed={"parts", "query"}, required=required)
 
 
 # ─── Task detection prompt (Phase 2) ──────────────────────────────────────────
@@ -386,14 +467,15 @@ class LambdaRLM:
                     f"query={repr(effective_query[:100])}, "
                     f"preview={repr(peek_text[:150])}"
                 )
+                task_detection_prompt = self.prompt_registry.render_task_detection(metadata=metadata)
                 raw = self._completion_with_metadata(
                     client,
-                    _TASK_DETECTION_PROMPT.format(metadata=metadata),
+                    task_detection_prompt,
                     self._model_call_metadata(
                         phase="task_detection",
                         combinator="classifier",
                         prompt_key="TASK-DETECTION-PROMPT.md",
-                        promptChars=len(_TASK_DETECTION_PROMPT.format(metadata=metadata)),
+                        promptChars=len(task_detection_prompt),
                         contextChars=n,
                         previewChars=len(peek_text[:150]),
                     ),
@@ -546,7 +628,7 @@ class LambdaRLM:
         """
         RegisterLibrary: inject pre-verified combinators L into repl.globals.
 
-        Registered names: _Split, _Peek, _Reduce, _FilterRelevant, _RenderQaPrompt.
+        Registered names: _Split, _Peek, _Reduce, _FilterRelevant, _RenderTaskPrompt.
         These are pure Python — no arbitrary LLM code.
         _Reduce may call repl._llm_query for merge-type operators (each call is
         a single bounded LLM invocation, not an open-ended loop).
@@ -600,13 +682,13 @@ class LambdaRLM:
                 if len(parts) == 1:
                     return parts[0]
                 merged = "\n\n---\n\n".join(parts)
-                prompt = MERGE_SUMMARIES_REDUCER_TEMPLATE.format(parts=merged)
+                prompt = self.prompt_registry.render_reducer(ComposeOp.MERGE_SUMMARIES, parts=merged, query=query)
                 return _llm(
                     prompt,
                     metadata=metadata_for(
                         phase="execute_phi",
                         combinator="reduce",
-                        prompt_key="reducers/merge_summaries.md",
+                        prompt_key="reducers/merge-summaries.md",
                         task_type=plan.task_type,
                         compose_op=compose_op,
                         partCount=len(parts),
@@ -626,13 +708,13 @@ class LambdaRLM:
                 if len(candidates) == 1:
                     return candidates[0]
                 merged = "\n\n---\n\n".join(candidates)
-                prompt = SELECT_RELEVANT_REDUCER_TEMPLATE.format(query=query, parts=merged)
+                prompt = self.prompt_registry.render_reducer(ComposeOp.SELECT_RELEVANT, parts=merged, query=query)
                 return _llm(
                     prompt,
                     metadata=metadata_for(
                         phase="execute_phi",
                         combinator="reduce",
-                        prompt_key="reducers/select_relevant.md",
+                        prompt_key="reducers/select-relevant.md",
                         task_type=plan.task_type,
                         compose_op=compose_op,
                         partCount=len(candidates),
@@ -668,13 +750,13 @@ class LambdaRLM:
                 if len(parts) == 1:
                     return parts[0]
                 merged = "\n\n---\n\n".join(parts)
-                prompt = COMBINE_ANALYSIS_REDUCER_TEMPLATE.format(parts=merged)
+                prompt = self.prompt_registry.render_reducer(ComposeOp.COMBINE_ANALYSIS, parts=merged, query=query)
                 return _llm(
                     prompt,
                     metadata=metadata_for(
                         phase="execute_phi",
                         combinator="reduce",
-                        prompt_key="reducers/combine_analysis.md",
+                        prompt_key="reducers/combine-analysis.md",
                         task_type=plan.task_type,
                         compose_op=compose_op,
                         partCount=len(parts),
@@ -686,8 +768,8 @@ class LambdaRLM:
             def _reduce(parts: list[str]) -> str:
                 return "\n\n".join(parts)
 
-        def _render_qa_prompt(*, text: str, query: str) -> str:
-            return self.prompt_registry.render_qa(text=text, query=query)
+        def _render_task_prompt(task_type_value: str, *, text: str, query: str) -> str:
+            return self.prompt_registry.render_task(TaskType(task_type_value), text=text, query=query)
 
         # ── FilterRelevant(query, [(chunk, preview)]) → [chunk] ──────────────
         # Used only when pipeline.use_filter=True (QA, Extraction).
@@ -695,7 +777,7 @@ class LambdaRLM:
         def _filter_relevant(query_text: str, items: list[tuple[str, str]]) -> list[str]:
             kept: list[str] = []
             for chunk, preview in items:
-                prompt = FILTER_RELEVANCE_TEMPLATE.format(query=query_text, preview=preview)
+                prompt = self.prompt_registry.render_filter_relevance(query=query_text, preview=preview)
                 resp = _llm(
                     prompt,
                     metadata=metadata_for(
@@ -720,7 +802,7 @@ class LambdaRLM:
         repl.globals["_Peek"]           = _peek
         repl.globals["_Reduce"]         = _reduce
         repl.globals["_FilterRelevant"] = _filter_relevant
-        repl.globals["_RenderQaPrompt"] = _render_qa_prompt
+        repl.globals["_RenderTaskPrompt"] = _render_task_prompt
 
     # ── Internal: Phase 5b — BuildExecutor + execute ─────────────────────────
 
@@ -730,7 +812,7 @@ class LambdaRLM:
 
         Φ is defined as a recursive Python function (not LLM-generated code).
         It references only combinators already registered in repl.globals:
-          _Split, _Peek, _Reduce, _FilterRelevant, _RenderQaPrompt  (from _register_library)
+          _Split, _Peek, _Reduce, _FilterRelevant, _RenderTaskPrompt (from _register_library)
           llm_query                                 (auto-registered by LocalREPL)
           context_0                                 (from LocalREPL.load_context)
 
@@ -747,7 +829,6 @@ class LambdaRLM:
         tau  = plan.tau_star
         k    = plan.k_star
         peek_len = max(50, tau // 10)
-        template = TASK_TEMPLATES[plan.task_type]
 
         # Leaf call: sub_M(Template[τ_type].Fmt(P)) — the ONLY neural call in Φ.
         leaf_metadata = self._model_call_metadata(
@@ -757,13 +838,7 @@ class LambdaRLM:
             task_type=plan.task_type,
             compose_op=plan.compose_op,
         )
-        if plan.task_type == TaskType.QA and query:
-            leaf_prompt_expr = f"_RenderQaPrompt(text=P, query={repr(query)})"
-        elif plan.task_type == TaskType.QA:
-            # No query available — preserve the legacy generic QA fallback.
-            leaf_prompt_expr = f"{repr(QA_FALLBACK_TEMPLATE)}.format(text=P)"
-        else:
-            leaf_prompt_expr = f"{repr(template)}.format(text=P)"
+        leaf_prompt_expr = f"_RenderTaskPrompt({repr(plan.task_type.value)}, text=P, query={repr(query)})"
         leaf_expr = (
             f"llm_query(_leaf_prompt := {leaf_prompt_expr}, "
             f"metadata={{**{repr(leaf_metadata)}, 'chunkChars': len(P), 'promptChars': len(_leaf_prompt)}})"
