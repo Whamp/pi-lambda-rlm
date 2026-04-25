@@ -1,27 +1,18 @@
-import type { ModelCall } from "./leafRunner.js";
+import type { Awaitable, ModelCall } from "./leaf-runner.js";
+import { ModelCallQueueCancelledError } from "./model-call-error.js";
 
-export type ModelCallQueueSnapshot = {
+export interface ModelCallQueueSnapshot {
   concurrency: number;
   active: number;
   queued: number;
-};
-
-export class ModelCallQueueCancelledError extends Error {
-  readonly requestId: string;
-
-  constructor(requestId: string) {
-    super(`Queued model call ${requestId} was cancelled before it started.`);
-    this.name = "ModelCallQueueCancelledError";
-    this.requestId = requestId;
-  }
 }
 
-type QueuedCall = {
+interface QueuedCall {
   call: ModelCall;
   start: () => void;
   reject: (error: unknown) => void;
   onAbort?: () => void;
-};
+}
 
 export class ModelCallConcurrencyQueue {
   readonly concurrency: number;
@@ -36,10 +27,12 @@ export class ModelCallConcurrencyQueue {
   }
 
   snapshot(): ModelCallQueueSnapshot {
-    return { concurrency: this.concurrency, active: this.active, queued: this.waiting.length };
+    return { active: this.active, concurrency: this.concurrency, queued: this.waiting.length };
   }
 
-  run<T>(call: ModelCall, runner: (call: ModelCall) => Promise<T>): Promise<T> {
+  run<T>(call: ModelCall, runner: (call: ModelCall) => Awaitable<T>): Promise<T> {
+    // The queue must return a pending promise while work waits for capacity.
+    // oxlint-disable-next-line promise/avoid-new
     return new Promise<T>((resolve, reject) => {
       const startRunner = () => {
         if (call.signal?.aborted) {
@@ -48,13 +41,17 @@ export class ModelCallConcurrencyQueue {
           return;
         }
         this.active += 1;
-        void Promise.resolve()
-          .then(() => runner(call))
-          .then(resolve, reject)
-          .finally(() => {
+        const settleRunner = async () => {
+          try {
+            resolve(await runner(call));
+          } catch (error) {
+            reject(error);
+          } finally {
             this.active -= 1;
             this.drain();
-          });
+          }
+        };
+        void settleRunner();
       };
 
       const queued: QueuedCall = { call, reject, start: startRunner };
@@ -75,7 +72,9 @@ export class ModelCallConcurrencyQueue {
       }
 
       queued.start = () => {
-        if (queued.onAbort) call.signal?.removeEventListener("abort", queued.onAbort);
+        if (queued.onAbort) {
+          call.signal?.removeEventListener("abort", queued.onAbort);
+        }
         startRunner();
       };
       if (this.active < this.concurrency) {
@@ -89,7 +88,9 @@ export class ModelCallConcurrencyQueue {
   private drain() {
     while (this.active < this.concurrency) {
       const next = this.waiting.shift();
-      if (!next) return;
+      if (!next) {
+        return;
+      }
       next.start();
     }
   }

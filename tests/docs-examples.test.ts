@@ -1,8 +1,8 @@
 import { readFile, stat } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
-async function text(path: string) {
-  return readFile(path, "utf8");
+function text(path: string) {
+  return readFile(path, "utf-8");
 }
 
 async function expectFile(path: string) {

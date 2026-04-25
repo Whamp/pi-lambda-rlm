@@ -1,49 +1,99 @@
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
 import { diagnosticHash } from "../src/diagnostics.js";
-import { executeLambdaRlmTool as executeLambdaRlmToolRaw, LambdaRlmValidationError } from "../src/lambdaRlmTool.js";
-import { ModelCallConcurrencyQueue } from "../src/modelCallQueue.js";
+import { executeLambdaRlmTool as executeLambdaRlmToolRaw } from "../src/lambda-rlm-tool.js";
+import type { ProcessResult } from "../src/leaf-runner.js";
+import { ModelCallConcurrencyQueue } from "../src/model-call-queue.js";
 
 async function tempContextFile(content: string) {
   const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-test-"));
   const path = join(dir, "context.txt");
-  await writeFile(path, content, "utf8");
+  await writeFile(path, content, "utf-8");
   return path;
 }
 
-async function executeLambdaRlmTool(params: unknown, options: Parameters<typeof executeLambdaRlmToolRaw>[1] = {}) {
-  const isolatedHome = options.homeDir || options.globalConfigPath ? undefined : await mkdtemp(join(tmpdir(), "lambda-rlm-isolated-home-"));
-  return executeLambdaRlmToolRaw(params, { ...(isolatedHome ? { homeDir: isolatedHome } : {}), ...options });
+async function executeLambdaRlmTool(
+  params: unknown,
+  options: Parameters<typeof executeLambdaRlmToolRaw>[1] = {},
+) {
+  const isolatedHome =
+    options.homeDir || options.globalConfigPath
+      ? undefined
+      : await mkdtemp(join(tmpdir(), "lambda-rlm-isolated-home-"));
+  return executeLambdaRlmToolRaw(params, {
+    ...(isolatedHome ? { homeDir: isolatedHome } : {}),
+    ...options,
+  });
 }
 
 async function tempPythonBridgeScript(source: string) {
   const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-bridge-script-"));
   const path = join(dir, "bridge.py");
-  await writeFile(path, source, "utf8");
+  await writeFile(path, source, "utf-8");
   await chmod(path, 0o755);
   return path;
 }
 
-function deferred<T = void>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((res) => {
-    resolve = res;
-  });
-  return { promise, resolve };
+type LambdaRlmToolTestResult = Awaited<ReturnType<typeof executeLambdaRlmTool>>;
+
+function firstContentText(result: LambdaRlmToolTestResult): string {
+  const [first] = result.content;
+  if (!first) {
+    throw new Error("Expected lambda_rlm result to include visible text content.");
+  }
+  return first.text;
 }
 
-async function tick() {
-  await Promise.resolve();
-  await Promise.resolve();
+function sortedStrings(values: Iterable<string>) {
+  const sorted = [...values];
+  // ES2022 target: Array#toSorted is unavailable in this project.
+  // oxlint-disable-next-line unicorn/no-array-sort
+  return sorted.sort();
+}
+
+function fullOutputPath(result: LambdaRlmToolTestResult): string {
+  const { output } = result.details;
+  if (!output || typeof output !== "object" || Array.isArray(output)) {
+    throw new TypeError("Expected lambda_rlm result details to include output metadata.");
+  }
+  const path = (output as Record<string, unknown>).fullOutputPath;
+  if (typeof path !== "string") {
+    throw new TypeError("Expected output metadata to include a fullOutputPath string.");
+  }
+  return path;
+}
+
+function resolveOnAbort(
+  signal: AbortSignal | undefined,
+  result: ProcessResult,
+): Promise<ProcessResult> {
+  // AbortSignal is EventTarget-based; a one-shot promise is the clearest test seam.
+  // oxlint-disable-next-line promise/avoid-new
+  return new Promise((resolve) => {
+    signal?.addEventListener("abort", () => resolve(result), { once: true });
+  });
+}
+
+function deferred<T = void>() {
+  let resolveDeferred!: (value: T | PromiseLike<T>) => void;
+  // Tests need a controllable deferred to assert queue ordering.
+  // oxlint-disable-next-line promise/avoid-new
+  const promise = new Promise<T>((resolve) => {
+    resolveDeferred = resolve;
+  });
+  return { promise, resolve: resolveDeferred };
 }
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    if (predicate()) {
+      return;
+    }
+    await delay(5);
   }
 }
 
@@ -57,28 +107,41 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
       "The Analytical Engine notes described algorithms and computation.",
     ].join(" ");
     const contextPath = await tempContextFile(secretContent);
-    const processCalls: Array<{ args: string[]; prompt: string }> = [];
+    const processCalls: { args: string[]; prompt: string }[] = [];
 
     const result = await executeLambdaRlmTool(
       { contextPath, question: "Who wrote notes about the Analytical Engine?" },
       {
-        leafModel: "google/gemini-test",
         contextWindowChars: 80,
+        leafModel: "google/gemini-test",
         leafProcessRunner: async (invocation) => {
           const promptFile = invocation.args.at(-1);
-          const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
+          const prompt = promptFile?.startsWith("@")
+            ? await readFile(promptFile.slice(1), "utf-8")
+            : "";
           processCalls.push({ args: invocation.args, prompt });
-          if (prompt.includes("Single digit:") && prompt.includes("select the single most appropriate task type")) {
+          if (
+            prompt.includes("Single digit:") &&
+            prompt.includes("select the single most appropriate task type")
+          ) {
             return { exitCode: 0, stdout: "2\n", stderr: "" };
           }
           if (prompt.includes("Does this excerpt contain information relevant")) {
             return { exitCode: 0, stdout: "YES\n", stderr: "" };
           }
           if (prompt.includes("Using the following context, answer")) {
-            return { exitCode: 0, stdout: "Partial answer: Ada Lovelace wrote notes about the Analytical Engine.\n", stderr: "" };
+            return {
+              exitCode: 0,
+              stdout: "Partial answer: Ada Lovelace wrote notes about the Analytical Engine.\n",
+              stderr: "",
+            };
           }
           if (prompt.includes("Synthesise these partial answers")) {
-            return { exitCode: 0, stdout: "Ada Lovelace wrote notes about the Analytical Engine.\n", stderr: "" };
+            return {
+              exitCode: 0,
+              stdout: "Ada Lovelace wrote notes about the Analytical Engine.\n",
+              stderr: "",
+            };
           }
           return { exitCode: 1, stdout: "", stderr: `unexpected prompt: ${prompt.slice(0, 120)}` };
         },
@@ -91,112 +154,181 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
     expect(text).toContain("Real Lambda-RLM completed");
     expect(text.length).toBeLessThanOrEqual(4096);
     expect(text).not.toContain("SECRET_SOURCE_CONTENT_SHOULD_NOT_BE_RETURNED");
-    expect(JSON.stringify(result.details)).not.toContain("SECRET_SOURCE_CONTENT_SHOULD_NOT_BE_RETURNED");
+    expect(JSON.stringify(result.details)).not.toContain(
+      "SECRET_SOURCE_CONTENT_SHOULD_NOT_BE_RETURNED",
+    );
     expect(result.details).toMatchObject({
-      ok: true,
       authoritativeAnswerAvailable: true,
+      bridgeRun: {
+        childPiLeafCalls: processCalls.length,
+        executionStarted: true,
+        leafModel: "google/gemini-test",
+        leafProfile: "formal_pi_print",
+        protocol: "strict-stdout-stdin-ndjson",
+        pythonBridge: true,
+        realLambdaRlm: true,
+      },
       input: {
-        source: "file",
-        contextPath,
         contextChars: secretContent.length,
+        contextPath,
         questionChars: "Who wrote notes about the Analytical Engine?".length,
         sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        source: "file",
       },
       modelCalls: {
-        total: processCalls.length,
         failed: 0,
+        total: processCalls.length,
       },
-      bridgeRun: {
-        executionStarted: true,
-        pythonBridge: true,
-        protocol: "strict-stdout-stdin-ndjson",
-        realLambdaRlm: true,
-        childPiLeafCalls: processCalls.length,
-        leafProfile: "formal_pi_print",
-        leafModel: "google/gemini-test",
-      },
+      ok: true,
       output: {
         bounded: true,
         truncated: false,
       },
     });
     expect(result.details).not.toHaveProperty("fakeRun");
-    const bridgeRunDetails = result.details.bridgeRun as { modelCallbacks: Array<Record<string, unknown>>; modelCallResponses: Array<Record<string, unknown>> };
-    expect(bridgeRunDetails.modelCallbacks[0]).toEqual(
+    const bridgeRunDetails = result.details.bridgeRun as {
+      modelCallbacks: Record<string, unknown>[];
+      modelCallResponses: Record<string, unknown>[];
+    };
+    expect(bridgeRunDetails.modelCallbacks[0]).toStrictEqual(
       expect.objectContaining({
-        requestId: "model-call-1",
-        metadata: expect.objectContaining({ source: "lambda_rlm", phase: "task_detection", combinator: "classifier" }),
+        metadata: expect.objectContaining({
+          source: "lambda_rlm",
+          phase: "task_detection",
+          combinator: "classifier",
+        }),
         promptChars: expect.any(Number),
+        requestId: "model-call-1",
       }),
     );
     expect(bridgeRunDetails.modelCallbacks[0]).not.toHaveProperty("prompt");
-    expect(bridgeRunDetails.modelCallResponses[0]).toEqual(
+    expect(bridgeRunDetails.modelCallResponses[0]).toStrictEqual(
       expect.objectContaining({
+        metadata: expect.objectContaining({
+          source: "lambda_rlm",
+          phase: "task_detection",
+          combinator: "classifier",
+        }),
         requestId: "model-call-1",
         status: "succeeded",
-        metadata: expect.objectContaining({ source: "lambda_rlm", phase: "task_detection", combinator: "classifier" }),
         stdoutChars: expect.any(Number),
       }),
     );
-    const promptDetails = (result.details.bridgeRun as { prompts: Record<string, Record<string, unknown>> }).prompts;
-    expect(promptDetails["TASK-DETECTION-PROMPT.md"]).toEqual(
-      expect.objectContaining({ source: expect.objectContaining({ layer: "built_in" }), bytes: expect.any(Number), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+    const promptDetails = (
+      result.details.bridgeRun as { prompts: Record<string, Record<string, unknown>> }
+    ).prompts;
+    expect(promptDetails["TASK-DETECTION-PROMPT.md"]).toStrictEqual(
+      expect.objectContaining({
+        bytes: expect.any(Number),
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        source: expect.objectContaining({ layer: "built_in" }),
+      }),
     );
-    expect(promptDetails["tasks/qa.md"]).toEqual(
-      expect.objectContaining({ source: expect.objectContaining({ layer: "built_in" }), bytes: expect.any(Number), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+    expect(promptDetails["tasks/qa.md"]).toStrictEqual(
+      expect.objectContaining({
+        bytes: expect.any(Number),
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        source: expect.objectContaining({ layer: "built_in" }),
+      }),
     );
-    expect(promptDetails["filters/relevance.md"]).toEqual(
-      expect.objectContaining({ source: expect.objectContaining({ layer: "built_in" }), bytes: expect.any(Number), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+    expect(promptDetails["filters/relevance.md"]).toStrictEqual(
+      expect.objectContaining({
+        bytes: expect.any(Number),
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        source: expect.objectContaining({ layer: "built_in" }),
+      }),
     );
-    expect(promptDetails["reducers/select-relevant.md"]).toEqual(
-      expect.objectContaining({ source: expect.objectContaining({ layer: "built_in" }), bytes: expect.any(Number), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+    expect(promptDetails["reducers/select-relevant.md"]).toStrictEqual(
+      expect.objectContaining({
+        bytes: expect.any(Number),
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        source: expect.objectContaining({ layer: "built_in" }),
+      }),
     );
     expect(promptDetails["tasks/qa.md"]).not.toHaveProperty("template");
     expect(promptDetails["tasks/qa.md"]).not.toHaveProperty("body");
     expect(JSON.stringify(result.details)).not.toContain("Single digit:");
     expect(processCalls.length).toBeGreaterThan(1);
-    expect(processCalls.some((call) => call.prompt.includes("Single digit:"))).toBe(true);
-    expect(processCalls.some((call) => call.prompt.includes("Using the following context, answer"))).toBe(true);
-    expect(processCalls[0]?.args).toEqual(
-      expect.arrayContaining(["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates"]),
+    expect(processCalls.some((call) => call.prompt.includes("Single digit:"))).toBeTruthy();
+    expect(
+      processCalls.some((call) => call.prompt.includes("Using the following context, answer")),
+    ).toBeTruthy();
+    expect(processCalls[0]?.args).toStrictEqual(
+      expect.arrayContaining([
+        "--print",
+        "--no-session",
+        "--no-tools",
+        "--no-extensions",
+        "--no-skills",
+        "--no-context-files",
+        "--no-prompt-templates",
+      ]),
     );
   });
 
   it("uses a QA prompt overlay in model-visible Lambda-RLM leaf prompts", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "lambda-rlm-qa-overlay-"));
     await mkdir(join(cwd, ".pi", "lambda-rlm", "prompts", "tasks"), { recursive: true });
-    await writeFile(join(cwd, ".pi", "lambda-rlm", "prompts", "tasks", "qa.md"), "PROJECT QA OVERRIDE\nQuestion: <<query>>\nText: <<text>>", "utf8");
+    await writeFile(
+      join(cwd, ".pi", "lambda-rlm", "prompts", "tasks", "qa.md"),
+      "PROJECT QA OVERRIDE\nQuestion: <<query>>\nText: <<text>>",
+      "utf-8",
+    );
     const contextPath = join(cwd, "context.txt");
-    await writeFile(contextPath, "The override fact is blue.", "utf8");
+    await writeFile(contextPath, "The override fact is blue.", "utf-8");
     const prompts: string[] = [];
 
     const result = await executeLambdaRlmTool(
       { contextPath: "context.txt", question: "What color is the override fact?" },
       {
-        cwd,
         contextWindowChars: 1000,
+        cwd,
         leafProcessRunner: async (invocation) => {
           const promptFile = invocation.args.at(-1);
-          const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
+          const prompt = promptFile?.startsWith("@")
+            ? await readFile(promptFile.slice(1), "utf-8")
+            : "";
           prompts.push(prompt);
-          return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : "blue\n", stderr: "" };
+          return {
+            exitCode: 0,
+            stdout: prompt.includes("Single digit:") ? "2\n" : "blue\n",
+            stderr: "",
+          };
         },
       },
     );
 
-    expect(result.details).toMatchObject({ ok: true, bridgeRun: { childPiLeafCalls: prompts.length } });
-    expect(prompts.some((prompt) => prompt.includes("PROJECT QA OVERRIDE"))).toBe(true);
-    expect(prompts.some((prompt) => prompt.includes("Using the following context, answer"))).toBe(false);
+    expect(result.details).toMatchObject({
+      bridgeRun: { childPiLeafCalls: prompts.length },
+      ok: true,
+    });
+    expect(prompts.some((prompt) => prompt.includes("PROJECT QA OVERRIDE"))).toBeTruthy();
+    expect(
+      prompts.some((prompt) => prompt.includes("Using the following context, answer")),
+    ).toBeFalsy();
     expect(JSON.stringify(result.details)).not.toContain("PROJECT QA OVERRIDE");
-    expect(result.details).toMatchObject({ bridgeRun: { prompts: { "tasks/qa.md": { source: { layer: "project" }, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) } } } });
+    expect(result.details).toMatchObject({
+      bridgeRun: {
+        prompts: {
+          "tasks/qa.md": {
+            sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+            source: { layer: "project" },
+          },
+        },
+      },
+    });
   });
 
   it("uses a Formal Leaf system prompt overlay when constructing child Pi commands", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "lambda-rlm-formal-overlay-"));
     await mkdir(join(cwd, ".pi", "lambda-rlm", "prompts"), { recursive: true });
-    await writeFile(join(cwd, ".pi", "lambda-rlm", "prompts", "FORMAL-LEAF-SYSTEM-PROMPT.md"), "PROJECT FORMAL LEAF SYSTEM", "utf8");
+    await writeFile(
+      join(cwd, ".pi", "lambda-rlm", "prompts", "FORMAL-LEAF-SYSTEM-PROMPT.md"),
+      "PROJECT FORMAL LEAF SYSTEM",
+      "utf-8",
+    );
     const contextPath = join(cwd, "context.txt");
-    await writeFile(contextPath, "Formal overlay context", "utf8");
+    await writeFile(contextPath, "Formal overlay context", "utf-8");
     const systemPrompts: string[] = [];
 
     const result = await executeLambdaRlmTool(
@@ -205,10 +337,16 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
         cwd,
         leafProcessRunner: async (invocation) => {
           const index = invocation.args.indexOf("--system-prompt");
-          systemPrompts.push(index >= 0 ? invocation.args[index + 1] ?? "" : "");
+          systemPrompts.push(index === -1 ? "" : (invocation.args[index + 1] ?? ""));
           const promptFile = invocation.args.at(-1);
-          const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
-          return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : "formal answer\n", stderr: "" };
+          const prompt = promptFile?.startsWith("@")
+            ? await readFile(promptFile.slice(1), "utf-8")
+            : "";
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: prompt.includes("Single digit:") ? "2\n" : "formal answer\n",
+          };
         },
       },
     );
@@ -220,22 +358,32 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
   it("fails prompt overlay validation before bridge or leaf execution", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "lambda-rlm-bad-prompt-"));
     await mkdir(join(cwd, ".pi", "lambda-rlm", "prompts", "tasks"), { recursive: true });
-    await writeFile(join(cwd, ".pi", "lambda-rlm", "prompts", "tasks", "qa.md"), "Bad <<text>> <<typo>>", "utf8");
+    await writeFile(
+      join(cwd, ".pi", "lambda-rlm", "prompts", "tasks", "qa.md"),
+      "Bad <<text>> <<typo>>",
+      "utf-8",
+    );
     const contextPath = join(cwd, "context.txt");
-    await writeFile(contextPath, "context", "utf8");
+    await writeFile(contextPath, "context", "utf-8");
     let leafStarted = false;
 
     const result = await executeLambdaRlmTool(
       { contextPath: "context.txt", question: "What?" },
-      { cwd, leafProcessRunner: async () => { leafStarted = true; return { exitCode: 0, stdout: "", stderr: "" }; } },
+      {
+        cwd,
+        leafProcessRunner: () => {
+          leafStarted = true;
+          return { exitCode: 0, stderr: "", stdout: "" };
+        },
+      },
     );
 
-    expect(leafStarted).toBe(false);
+    expect(leafStarted).toBeFalsy();
     expect(result.details).toMatchObject({
+      error: { code: "unknown_prompt_placeholder", field: "tasks/qa.md", type: "validation" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
       ok: false,
       runStatus: "validation_failed",
-      error: { type: "validation", code: "unknown_prompt_placeholder", field: "tasks/qa.md" },
-      execution: { executionStarted: false, partialDetailsAvailable: false },
     });
   });
 
@@ -255,32 +403,38 @@ print(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"conten
 
     const sharedLeafProcessRunner = async (invocation: { args: string[] }) => {
       const promptFile = invocation.args.at(-1);
-      const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
+      const prompt = promptFile?.startsWith("@")
+        ? await readFile(promptFile.slice(1), "utf-8")
+        : "";
       starts.push(prompt);
-      if (starts.length === 1) await releaseFirst.promise;
+      if (starts.length === 1) {
+        await releaseFirst.promise;
+      }
       const answer = prompt.includes("run A") ? "answer A" : "answer B";
-      return { exitCode: 0, stdout: `${answer}\n`, stderr: "" };
+      return { exitCode: 0, stderr: "", stdout: `${answer}\n` };
     };
 
     const runA = executeLambdaRlmTool(
       { contextPath, question: "run A" },
-      { bridgePath, modelCallQueue: queue, leafProcessRunner: sharedLeafProcessRunner },
+      { bridgePath, leafProcessRunner: sharedLeafProcessRunner, modelCallQueue: queue },
     );
     const runB = executeLambdaRlmTool(
       { contextPath, question: "run B" },
-      { bridgePath, modelCallQueue: queue, leafProcessRunner: sharedLeafProcessRunner },
+      { bridgePath, leafProcessRunner: sharedLeafProcessRunner, modelCallQueue: queue },
     );
 
     await waitUntil(() => starts.length === 1 && queue.snapshot().queued === 1);
     expect(starts).toHaveLength(1);
-    expect(queue.snapshot()).toEqual({ concurrency: 1, active: 1, queued: 1 });
+    expect(queue.snapshot()).toStrictEqual({ active: 1, concurrency: 1, queued: 1 });
 
     releaseFirst.resolve();
     const [resultA, resultB] = await Promise.all([runA, runB]);
     expect(resultA.details).toMatchObject({ ok: true });
     expect(resultB.details).toMatchObject({ ok: true });
-    expect(starts).toEqual(expect.arrayContaining([expect.stringContaining("run A"), expect.stringContaining("run B")]));
-    expect(queue.snapshot()).toEqual({ concurrency: 1, active: 0, queued: 0 });
+    expect(starts).toStrictEqual(
+      expect.arrayContaining([expect.stringContaining("run A"), expect.stringContaining("run B")]),
+    );
+    expect(queue.snapshot()).toStrictEqual({ active: 0, concurrency: 1, queued: 0 });
   });
 
   it("returns a structured runtime failure with child process diagnostics when the constrained leaf process exits non-zero", async () => {
@@ -290,30 +444,42 @@ print(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"conten
       { contextPath, question: "What fails?" },
       {
         leafModel: "google/gemini-test",
-        leafProcessRunner: async () => ({
+        leafProcessRunner: () => ({
           exitCode: 7,
-          stdout: "leaf stdout before failure",
-          stderr: "leaf stderr auth failure",
           signal: null,
+          stderr: "leaf stderr auth failure",
+          stdout: "leaf stdout before failure",
         }),
       },
     );
 
-    expect(result.content[0]!.text).toContain("No authoritative answer is available");
+    expect(firstContentText(result)).toContain("No authoritative answer is available");
     expect(result.details).toMatchObject({
-      ok: false,
-      runStatus: "runtime_failed",
       answer: null,
       authoritativeAnswerAvailable: false,
       error: {
-        type: "runtime",
         code: "model_callback_failed",
         message: expect.stringContaining("Child pi leaf process exited with code 7"),
+        type: "runtime",
       },
+      ok: false,
       partialRun: {
         executionStarted: true,
-        partialDetailsAvailable: true,
-        pythonBridge: true,
+        failedRunResult: {
+          error: { code: "model_callback_failed", type: "model_callback_failure" },
+          modelCallFailure: {
+            diagnostics: {
+              exitCode: 7,
+              signal: null,
+              stderr: "",
+              stderrBytes: Buffer.byteLength("leaf stderr auth failure", "utf-8"),
+              stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+              stdout: "",
+              stdoutBytes: Buffer.byteLength("leaf stdout before failure", "utf-8"),
+              stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+            },
+          },
+        },
         modelCallResponses: [
           {
             ok: false,
@@ -322,8 +488,8 @@ print(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"conten
             diagnostics: {
               stdout: "",
               stderr: "",
-              stdoutBytes: Buffer.byteLength("leaf stdout before failure", "utf8"),
-              stderrBytes: Buffer.byteLength("leaf stderr auth failure", "utf8"),
+              stdoutBytes: Buffer.byteLength("leaf stdout before failure", "utf-8"),
+              stderrBytes: Buffer.byteLength("leaf stderr auth failure", "utf-8"),
               stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
               stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
               exitCode: 7,
@@ -331,22 +497,10 @@ print(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"conten
             },
           },
         ],
-        failedRunResult: {
-          error: { type: "model_callback_failure", code: "model_callback_failed" },
-          modelCallFailure: {
-            diagnostics: {
-              stdout: "",
-              stderr: "",
-              stdoutBytes: Buffer.byteLength("leaf stdout before failure", "utf8"),
-              stderrBytes: Buffer.byteLength("leaf stderr auth failure", "utf8"),
-              stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
-              stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
-              exitCode: 7,
-              signal: null,
-            },
-          },
-        },
+        partialDetailsAvailable: true,
+        pythonBridge: true,
       },
+      runStatus: "runtime_failed",
     });
   });
 
@@ -355,32 +509,41 @@ print(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"conten
     [{ contextPath: "", question: "What?" }, "missing_context_path"],
     [{ contextPath: "file.txt" }, "missing_question"],
     [{ contextPath: "file.txt", question: "" }, "missing_question"],
-    [{ contextPath: "file.txt", question: "What?", context: "inline text" }, "unsupported_input"],
-    [{ contextPath: "file.txt", question: "What?", prompt: "raw prompt" }, "unsupported_input"],
+    [{ context: "inline text", contextPath: "file.txt", question: "What?" }, "unsupported_input"],
+    [{ contextPath: "file.txt", prompt: "raw prompt", question: "What?" }, "unsupported_input"],
     [{ contextPath: "file.txt", question: "What?", rawPrompt: "raw prompt" }, "unsupported_input"],
-    [{ contextPath: "file.txt", question: "What?", contextPaths: ["a", "b"] }, "mixed_context_path_fields"],
-    [{ contextPath: "file.txt", question: "What?", path: "other.txt" }, "unsupported_input"],
-    [{ contextPath: "file.txt", question: "What?", extra: true }, "unknown_keys"],
-  ])("returns a pre-execution validation failure result for invalid public input shape %#", async (params, code) => {
-    const result = await executeLambdaRlmTool(params);
+    [
+      { contextPath: "file.txt", contextPaths: ["a", "b"], question: "What?" },
+      "mixed_context_path_fields",
+    ],
+    [{ contextPath: "file.txt", path: "other.txt", question: "What?" }, "unsupported_input"],
+    [{ contextPath: "file.txt", extra: true, question: "What?" }, "unknown_keys"],
+  ])(
+    "returns a pre-execution validation failure result for invalid public input shape %#",
+    async (params, code) => {
+      const result = await executeLambdaRlmTool(params);
 
-    expect(result.details).toMatchObject({
-      ok: false,
-      runStatus: "validation_failed",
-      error: { type: "validation", code },
-      execution: { executionStarted: false, partialDetailsAvailable: false },
-    });
-    expect(result.details).not.toHaveProperty("partialRun");
-  });
+      expect(result.details).toMatchObject({
+        error: { code, type: "validation" },
+        execution: { executionStarted: false, partialDetailsAvailable: false },
+        ok: false,
+        runStatus: "validation_failed",
+      });
+      expect(result.details).not.toHaveProperty("partialRun");
+    },
+  );
 
   it("fails before execution with structured validation details when the context file is missing", async () => {
-    const result = await executeLambdaRlmTool({ contextPath: "/definitely/missing/context.txt", question: "What?" });
+    const result = await executeLambdaRlmTool({
+      contextPath: "/definitely/missing/context.txt",
+      question: "What?",
+    });
 
     expect(result.details).toMatchObject({
+      error: { code: "missing_context_path_file", field: "contextPath", type: "validation" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
       ok: false,
       runStatus: "validation_failed",
-      error: { type: "validation", code: "missing_context_path_file", field: "contextPath" },
-      execution: { executionStarted: false, partialDetailsAvailable: false },
     });
     expect(result.details).not.toHaveProperty("partialRun");
   });
@@ -393,10 +556,10 @@ print(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"conten
     const result = await executeLambdaRlmTool({ contextPath: childDir, question: "What?" });
 
     expect(result.details).toMatchObject({
+      error: { code: "unreadable_context_path", field: "contextPath", type: "validation" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
       ok: false,
       runStatus: "validation_failed",
-      error: { type: "validation", code: "unreadable_context_path", field: "contextPath" },
-      execution: { executionStarted: false, partialDetailsAvailable: false },
     });
     expect(result.details).not.toHaveProperty("partialRun");
   });
@@ -411,34 +574,42 @@ sys.stderr.flush()
 print("{not json", flush=True)
 `);
 
-    const result = await executeLambdaRlmTool({ contextPath, question: "What happened?" }, { bridgePath });
+    const result = await executeLambdaRlmTool(
+      { contextPath, question: "What happened?" },
+      { bridgePath },
+    );
 
-    expect(result.content[0]!.text).toContain("No authoritative answer is available");
+    expect(firstContentText(result)).toContain("No authoritative answer is available");
     expect(result.details).toMatchObject({
-      ok: false,
-      runStatus: "runtime_failed",
       answer: null,
       authoritativeAnswerAvailable: false,
       error: {
-        type: "protocol",
         code: "malformed_stdout_json",
         message: expect.stringContaining("Bridge stdout line was not valid JSON"),
+        type: "protocol",
       },
+      ok: false,
       partialRun: {
         executionStarted: true,
         partialDetailsAvailable: true,
-        pythonBridge: true,
         protocol: "strict-stdout-stdin-ndjson",
-        stdoutProtocolLines: 1,
-        stderrDiagnosticsChars: expect.any(Number),
         protocolError: {
           code: "malformed_stdout_json",
-          offendingStdoutLine: { bytes: Buffer.byteLength("{not json", "utf8"), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+          offendingStdoutLine: {
+            bytes: Buffer.byteLength("{not json", "utf-8"),
+            sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          },
         },
+        pythonBridge: true,
+        stderrDiagnosticsChars: expect.any(Number),
+        stdoutProtocolLines: 1,
       },
+      runStatus: "runtime_failed",
     });
     expect(JSON.stringify(result.details)).not.toContain("{not json");
-    expect(JSON.stringify(result.details)).not.toContain("bridge diagnostic before malformed stdout");
+    expect(JSON.stringify(result.details)).not.toContain(
+      "bridge diagnostic before malformed stdout",
+    );
   });
 
   it("sanitizes child stdout and stderr in runtime failure details", async () => {
@@ -450,7 +621,12 @@ print("{not json", flush=True)
       { contextPath, question: "Trigger child failure?" },
       {
         contextWindowChars: 1000,
-        leafProcessRunner: async () => ({ exitCode: 17, signal: null, stdout: rawStdout, stderr: rawStderr }),
+        leafProcessRunner: () => ({
+          exitCode: 17,
+          signal: null,
+          stderr: rawStderr,
+          stdout: rawStdout,
+        }),
       },
     );
 
@@ -462,16 +638,16 @@ print("{not json", flush=True)
       partialRun: {
         modelCallResponses: [
           {
-            ok: false,
             diagnostics: {
-              stdout: "",
-              stderr: "",
-              stdoutBytes: Buffer.byteLength(rawStdout, "utf8"),
-              stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
-              stderrBytes: Buffer.byteLength(rawStderr, "utf8"),
-              stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
               exitCode: 17,
+              stderr: "",
+              stderrBytes: Buffer.byteLength(rawStderr, "utf-8"),
+              stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+              stdout: "",
+              stdoutBytes: Buffer.byteLength(rawStdout, "utf-8"),
+              stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
             },
+            ok: false,
           },
         ],
       },
@@ -486,7 +662,10 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({"type":"run_result","runId":request["runId"],"ok":False,"error":{"type":"runtime","code":"bridge_failed","message":"failed safely"},"modelCallFailure":{"ok":False,"requestId":"model-call-x","rawPrompt":"RAW_PROMPT_SECRET_SENTINEL","source":"MODEL_RUNNER_SOURCE_SENTINEL","error":{"type":"child_process","code":"child_exit_nonzero","message":"child failed"},"diagnostics":{"stdout":"RAW_FAILED_PAYLOAD_STDOUT","stderr":"RAW_FAILED_PAYLOAD_STDERR","stdoutBytes":999999,"stdoutSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","stderrBytes":888888,"stderrSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","signal":"RAW_SECRET_SENTINEL","exitCode":2}}}), flush=True)
 `);
 
-    const result = await executeLambdaRlmTool({ contextPath, question: "What happened?" }, { bridgePath });
+    const result = await executeLambdaRlmTool(
+      { contextPath, question: "What happened?" },
+      { bridgePath },
+    );
 
     const serialized = JSON.stringify(result.details);
     expect(serialized).not.toContain("RAW_FAILED_PAYLOAD_STDOUT");
@@ -496,33 +675,47 @@ print(json.dumps({"type":"run_result","runId":request["runId"],"ok":False,"error
     expect(serialized).not.toContain("RAW_SECRET_SENTINEL");
     expect(serialized).not.toContain("999999");
     expect(serialized).not.toContain("888888");
-    expect(serialized).not.toContain("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    expect(serialized).not.toContain("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    expect(serialized).not.toContain(
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    expect(serialized).not.toContain(
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
     expect(result.details).toMatchObject({
       ok: false,
       partialRun: {
-        finalResults: 1,
         failedRunResult: {
           modelCallFailure: {
+            diagnostics: {
+              exitCode: 2,
+              stderr: "",
+              stderrBytes: Buffer.byteLength("RAW_FAILED_PAYLOAD_STDERR", "utf-8"),
+              stderrSha256: diagnosticHash("RAW_FAILED_PAYLOAD_STDERR"),
+              stdout: "",
+              stdoutBytes: Buffer.byteLength("RAW_FAILED_PAYLOAD_STDOUT", "utf-8"),
+              stdoutSha256: diagnosticHash("RAW_FAILED_PAYLOAD_STDOUT"),
+            },
+            error: { code: "child_exit_nonzero", message: "child failed", type: "child_process" },
             ok: false,
             requestId: "model-call-x",
-            error: { type: "child_process", code: "child_exit_nonzero", message: "child failed" },
-            diagnostics: {
-              stdout: "",
-              stderr: "",
-              stdoutBytes: Buffer.byteLength("RAW_FAILED_PAYLOAD_STDOUT", "utf8"),
-              stdoutSha256: diagnosticHash("RAW_FAILED_PAYLOAD_STDOUT"),
-              stderrBytes: Buffer.byteLength("RAW_FAILED_PAYLOAD_STDERR", "utf8"),
-              stderrSha256: diagnosticHash("RAW_FAILED_PAYLOAD_STDERR"),
-              exitCode: 2,
-            },
           },
         },
+        finalResults: 1,
       },
     });
-    const modelCallFailure = ((result.details.partialRun as Record<string, unknown>).failedRunResult as { modelCallFailure: Record<string, unknown> }).modelCallFailure;
-    expect(Object.keys(modelCallFailure).sort()).toEqual(["diagnostics", "error", "ok", "requestId"]);
-    expect(Object.keys(modelCallFailure.diagnostics as Record<string, unknown>).sort()).toEqual([
+    const { modelCallFailure } = (result.details.partialRun as Record<string, unknown>)
+      .failedRunResult as {
+      modelCallFailure: Record<string, unknown>;
+    };
+    expect(sortedStrings(Object.keys(modelCallFailure))).toStrictEqual([
+      "diagnostics",
+      "error",
+      "ok",
+      "requestId",
+    ]);
+    expect(
+      sortedStrings(Object.keys(modelCallFailure.diagnostics as Record<string, unknown>)),
+    ).toStrictEqual([
       "exitCode",
       "stderr",
       "stderrBytes",
@@ -543,13 +736,16 @@ print(json.dumps(result), flush=True)
 print(json.dumps(result), flush=True)
 `);
 
-    const result = await executeLambdaRlmTool({ contextPath, question: "What happened?" }, { bridgePath });
+    const result = await executeLambdaRlmTool(
+      { contextPath, question: "What happened?" },
+      { bridgePath },
+    );
 
     expect(result.details).toMatchObject({
+      error: { code: "multiple_final_results", type: "protocol" },
       ok: false,
-      runStatus: "runtime_failed",
-      error: { type: "protocol", code: "multiple_final_results" },
       partialRun: { finalResults: 1 },
+      runStatus: "runtime_failed",
     });
   });
 
@@ -563,31 +759,36 @@ sys.stderr.flush()
 sys.exit(0)
 `);
 
-    const result = await executeLambdaRlmTool({ contextPath, question: "What happened?" }, { bridgePath });
+    const result = await executeLambdaRlmTool(
+      { contextPath, question: "What happened?" },
+      { bridgePath },
+    );
 
     expect(result.details).toMatchObject({
-      ok: false,
-      runStatus: "runtime_failed",
       answer: null,
       authoritativeAnswerAvailable: false,
       error: {
-        type: "protocol",
         code: "missing_final_result",
+        type: "protocol",
       },
+      ok: false,
       partialRun: {
         executionStarted: true,
+        finalResults: 0,
         partialDetailsAvailable: true,
         pythonBridge: true,
         stdoutProtocolLines: 0,
-        finalResults: 0,
       },
+      runStatus: "runtime_failed",
     });
   });
 
   it("returns a structured runtime failure without source contents when a large assembled request hits a bridge that exits before reading stdin", async () => {
     const secretContent = `SECRET_LARGE_STDIN_SOURCE_${"x".repeat(256 * 1024)}`;
     const firstPath = await tempContextFile(secretContent);
-    const secondPath = await tempContextFile("small second source keeps contextPaths assembly active");
+    const secondPath = await tempContextFile(
+      "small second source keeps contextPaths assembly active",
+    );
     const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
 import sys
 sys.stderr.write("bridge exiting before stdin read\\n")
@@ -595,12 +796,18 @@ sys.stderr.flush()
 sys.exit(0)
 `);
 
-    const result = await executeLambdaRlmTool({ contextPaths: [firstPath, secondPath], question: "What happened?" }, { bridgePath });
+    const result = await executeLambdaRlmTool(
+      { contextPaths: [firstPath, secondPath], question: "What happened?" },
+      { bridgePath },
+    );
 
     expect(result.content[0]).toMatchObject({ type: "text" });
     const text = result.content[0]?.type === "text" ? result.content[0].text : "";
     expect(text).toContain("lambda_rlm runtime failed");
-    expect(result.details).toMatchObject({ ok: false, error: { type: "runtime", code: "bridge_stdin_write_failed" } });
+    expect(result.details).toMatchObject({
+      error: { code: "bridge_stdin_write_failed", type: "runtime" },
+      ok: false,
+    });
     expect(JSON.stringify(result.details)).not.toContain("SECRET_LARGE_STDIN_SOURCE_");
     expect(text).not.toContain("SECRET_LARGE_STDIN_SOURCE_");
   });
@@ -609,28 +816,28 @@ sys.exit(0)
     const cwd = await mkdtemp(join(tmpdir(), "lambda-rlm-project-config-"));
     const configPath = join(cwd, ".pi", "lambda-rlm", "config.toml");
     await mkdir(join(cwd, ".pi", "lambda-rlm"), { recursive: true });
-    await writeFile(configPath, "[run]\nmax_input_bytes = 9\n", "utf8");
+    await writeFile(configPath, "[run]\nmax_input_bytes = 9\n", "utf-8");
     const contextPath = join(cwd, "context.txt");
-    await writeFile(contextPath, "1234567890", "utf8");
+    await writeFile(contextPath, "1234567890", "utf-8");
     let bridgeStarted = false;
 
     const result = await executeLambdaRlmTool(
       { contextPath: "context.txt", question: "Too large?" },
       {
         cwd,
-        leafProcessRunner: async () => {
+        leafProcessRunner: () => {
           bridgeStarted = true;
-          return { exitCode: 0, stdout: "", stderr: "" };
+          return { exitCode: 0, stderr: "", stdout: "" };
         },
       },
     );
 
-    expect(bridgeStarted).toBe(false);
+    expect(bridgeStarted).toBeFalsy();
     expect(result.details).toMatchObject({
+      error: { code: "max_input_bytes_exceeded", field: "contextPath", type: "validation" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
       ok: false,
       runStatus: "validation_failed",
-      error: { type: "validation", code: "max_input_bytes_exceeded", field: "contextPath" },
-      execution: { executionStarted: false, partialDetailsAvailable: false },
     });
   });
 
@@ -639,21 +846,21 @@ sys.exit(0)
     let bridgeStarted = false;
 
     const result = await executeLambdaRlmTool(
-      { contextPath, question: "Too large?", maxInputBytes: 9 },
+      { contextPath, maxInputBytes: 9, question: "Too large?" },
       {
-        leafProcessRunner: async () => {
+        leafProcessRunner: () => {
           bridgeStarted = true;
-          return { exitCode: 0, stdout: "", stderr: "" };
+          return { exitCode: 0, stderr: "", stdout: "" };
         },
       },
     );
 
-    expect(bridgeStarted).toBe(false);
+    expect(bridgeStarted).toBeFalsy();
     expect(result.details).toMatchObject({
+      error: { code: "max_input_bytes_exceeded", field: "contextPath", type: "validation" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
       ok: false,
       runStatus: "validation_failed",
-      error: { type: "validation", code: "max_input_bytes_exceeded", field: "contextPath" },
-      execution: { executionStarted: false, partialDetailsAvailable: false },
     });
   });
 
@@ -664,21 +871,21 @@ sys.exit(0)
 
     try {
       const result = await executeLambdaRlmTool(
-        { contextPath, question: "Too large?", maxInputBytes: 9 },
+        { contextPath, maxInputBytes: 9, question: "Too large?" },
         {
-          leafProcessRunner: async () => {
+          leafProcessRunner: () => {
             bridgeStarted = true;
-            return { exitCode: 0, stdout: "", stderr: "" };
+            return { exitCode: 0, stderr: "", stdout: "" };
           },
         },
       );
 
-      expect(bridgeStarted).toBe(false);
+      expect(bridgeStarted).toBeFalsy();
       expect(result.details).toMatchObject({
+        error: { code: "max_input_bytes_exceeded", field: "contextPath", type: "validation" },
+        execution: { executionStarted: false, partialDetailsAvailable: false },
         ok: false,
         runStatus: "validation_failed",
-        error: { type: "validation", code: "max_input_bytes_exceeded", field: "contextPath" },
-        execution: { executionStarted: false, partialDetailsAvailable: false },
       });
     } finally {
       await chmod(contextPath, 0o600);
@@ -691,23 +898,32 @@ sys.exit(0)
     const longAnswer = ["ANSWER", "line two", "line three", "line four"].join("\n");
 
     const result = await executeLambdaRlmTool(
-      { contextPath, question: "Produce long output", outputMaxBytes: 140, outputMaxLines: 3 },
+      { contextPath, outputMaxBytes: 140, outputMaxLines: 3, question: "Produce long output" },
       {
         fullOutputDir,
         leafProcessRunner: async (invocation) => {
           const promptFile = invocation.args.at(-1);
-          const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
-          return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : `${longAnswer}\n`, stderr: "" };
+          const prompt = promptFile?.startsWith("@")
+            ? await readFile(promptFile.slice(1), "utf-8")
+            : "";
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: prompt.includes("Single digit:") ? "2\n" : `${longAnswer}\n`,
+          };
         },
       },
     );
 
-    expect(result.content[0]!.text).toContain("truncated");
-    expect(result.content[0]!.text.split("\n").length).toBeLessThanOrEqual(3);
-    expect(Buffer.byteLength(result.content[0]!.text, "utf8")).toBeLessThanOrEqual(140);
-    expect(result.details).toMatchObject({ ok: true, output: { truncated: true, maxVisibleBytes: 140, maxVisibleLines: 3 } });
-    const fullOutputPath = (result.details.output as any).fullOutputPath;
-    await expect(readFile(fullOutputPath, "utf8")).resolves.toContain(longAnswer);
+    const visibleText = firstContentText(result);
+    expect(visibleText).toContain("truncated");
+    expect(visibleText.split("\n").length).toBeLessThanOrEqual(3);
+    expect(Buffer.byteLength(visibleText, "utf-8")).toBeLessThanOrEqual(140);
+    expect(result.details).toMatchObject({
+      ok: true,
+      output: { maxVisibleBytes: 140, maxVisibleLines: 3, truncated: true },
+    });
+    await expect(readFile(fullOutputPath(result), "utf-8")).resolves.toContain(longAnswer);
   });
 
   it("enforces per-run max model calls in the real bridge path before starting an additional leaf process", async () => {
@@ -715,32 +931,38 @@ sys.exit(0)
     const started: string[] = [];
 
     const result = await executeLambdaRlmTool(
-      { contextPath, question: "What?", maxModelCalls: 1 },
+      { contextPath, maxModelCalls: 1, question: "What?" },
       {
         leafProcessRunner: async (invocation) => {
           const promptFile = invocation.args.at(-1);
-          const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
+          const prompt = promptFile?.startsWith("@")
+            ? await readFile(promptFile.slice(1), "utf-8")
+            : "";
           started.push(prompt);
-          return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : "unexpected\n", stderr: "" };
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: prompt.includes("Single digit:") ? "2\n" : "unexpected\n",
+          };
         },
       },
     );
 
     expect(started).toHaveLength(1);
-    expect(result.content[0]!.text).toContain("No authoritative answer is available");
+    expect(firstContentText(result)).toContain("No authoritative answer is available");
     expect(result.details).toMatchObject({
-      ok: false,
-      runStatus: "runtime_failed",
       authoritativeAnswerAvailable: false,
-      error: { type: "runtime", code: "max_model_calls_exceeded" },
+      error: { code: "max_model_calls_exceeded", type: "runtime" },
+      ok: false,
       partialRun: {
         childPiLeafCalls: 1,
-        runControls: { maxModelCalls: 1 },
         modelCallResponses: [
           { ok: true, requestId: "model-call-1" },
           { ok: false, requestId: "model-call-2", error: { code: "max_model_calls_exceeded" } },
         ],
+        runControls: { maxModelCalls: 1 },
       },
+      runStatus: "runtime_failed",
     });
   });
 
@@ -754,14 +976,22 @@ sys.stderr.flush()
 time.sleep(30)
 `);
 
-    const result = await executeLambdaRlmTool({ contextPath, question: "Timeout?", wholeRunTimeoutMs: 20 }, { bridgePath });
+    const result = await executeLambdaRlmTool(
+      { contextPath, question: "Timeout?", wholeRunTimeoutMs: 20 },
+      { bridgePath },
+    );
 
     expect(result.details).toMatchObject({
-      ok: false,
-      runStatus: "runtime_failed",
       authoritativeAnswerAvailable: false,
-      error: { type: "runtime", code: "whole_run_timeout" },
-      partialRun: { executionStarted: true, partialDetailsAvailable: true, stderrDiagnosticsChars: expect.any(Number), runControls: { wholeRunTimeoutMs: 20 } },
+      error: { code: "whole_run_timeout", type: "runtime" },
+      ok: false,
+      partialRun: {
+        executionStarted: true,
+        partialDetailsAvailable: true,
+        runControls: { wholeRunTimeoutMs: 20 },
+        stderrDiagnosticsChars: expect.any(Number),
+      },
+      runStatus: "runtime_failed",
     });
   });
 
@@ -770,26 +1000,35 @@ time.sleep(30)
     let observedAbort = false;
 
     const result = await executeLambdaRlmTool(
-      { contextPath, question: "Timeout leaf?", modelCallTimeoutMs: 10 },
+      { contextPath, modelCallTimeoutMs: 10, question: "Timeout leaf?" },
       {
-        leafProcessRunner: (invocation) =>
-          new Promise((resolve) => {
-            invocation.signal?.addEventListener("abort", () => {
-              observedAbort = true;
-              resolve({ exitCode: null, signal: "SIGTERM", stdout: "partial", stderr: "leaf timeout" });
-            });
-          }),
+        leafProcessRunner: async (invocation) => {
+          const processResult = await resolveOnAbort(invocation.signal, {
+            exitCode: null,
+            signal: "SIGTERM",
+            stderr: "leaf timeout",
+            stdout: "partial",
+          });
+          observedAbort = true;
+          return processResult;
+        },
       },
     );
 
-    expect(observedAbort).toBe(true);
+    expect(observedAbort).toBeTruthy();
     expect(result.details).toMatchObject({
-      ok: false,
       authoritativeAnswerAvailable: false,
       error: { code: "model_callback_failed" },
+      ok: false,
       partialRun: {
+        modelCallResponses: [
+          {
+            ok: false,
+            error: { code: "per_model_call_timeout" },
+            diagnostics: { signal: "SIGTERM" },
+          },
+        ],
         runControls: { modelCallTimeoutMs: 10 },
-        modelCallResponses: [{ ok: false, error: { code: "per_model_call_timeout" }, diagnostics: { signal: "SIGTERM" } }],
       },
     });
   });
@@ -798,8 +1037,8 @@ time.sleep(30)
     const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-multi-"));
     const firstPath = join(dir, "b.txt");
     const secondPath = join(dir, "a.txt");
-    await writeFile(firstPath, "FIRST_SECRET_CONTENT\nfirst fact", "utf8");
-    await writeFile(secondPath, "SECOND_SECRET_CONTENT\nsecond fact", "utf8");
+    await writeFile(firstPath, "FIRST_SECRET_CONTENT\nfirst fact", "utf-8");
+    await writeFile(secondPath, "SECOND_SECRET_CONTENT\nsecond fact", "utf-8");
     const prompts: string[] = [];
 
     const result = await executeLambdaRlmTool(
@@ -808,27 +1047,48 @@ time.sleep(30)
         contextWindowChars: 1000,
         leafProcessRunner: async (invocation) => {
           const promptFile = invocation.args.at(-1);
-          const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
+          const prompt = promptFile?.startsWith("@")
+            ? await readFile(promptFile.slice(1), "utf-8")
+            : "";
           prompts.push(prompt);
-          return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : "Both facts are present.\n", stderr: "" };
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: prompt.includes("Single digit:") ? "2\n" : "Both facts are present.\n",
+          };
         },
       },
     );
 
     expect(result.details).toMatchObject({
-      ok: true,
+      bridgeRun: { childPiLeafCalls: prompts.length },
       input: {
         source: "files",
         sourceCount: 2,
-        totalBytes: Buffer.byteLength("FIRST_SECRET_CONTENT\nfirst factSECOND_SECRET_CONTENT\nsecond fact", "utf8"),
         sources: [
-          { sourceNumber: 1, path: firstPath, bytes: Buffer.byteLength("FIRST_SECRET_CONTENT\nfirst fact", "utf8"), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
-          { sourceNumber: 2, path: secondPath, bytes: Buffer.byteLength("SECOND_SECRET_CONTENT\nsecond fact", "utf8"), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+          {
+            sourceNumber: 1,
+            path: firstPath,
+            bytes: Buffer.byteLength("FIRST_SECRET_CONTENT\nfirst fact", "utf-8"),
+            sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          },
+          {
+            sourceNumber: 2,
+            path: secondPath,
+            bytes: Buffer.byteLength("SECOND_SECRET_CONTENT\nsecond fact", "utf-8"),
+            sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          },
         ],
+        totalBytes: Buffer.byteLength(
+          "FIRST_SECRET_CONTENT\nfirst factSECOND_SECRET_CONTENT\nsecond fact",
+          "utf-8",
+        ),
       },
-      bridgeRun: { childPiLeafCalls: prompts.length },
+      ok: true,
     });
-    const leafPrompt = prompts.find((prompt) => prompt.includes("Using the following context, answer"));
+    const leafPrompt = prompts.find((prompt) =>
+      prompt.includes("Using the following context, answer"),
+    );
     expect(leafPrompt).toContain(`Sources:\n[1] ${firstPath} (`);
     expect(leafPrompt).toContain(`[2] ${secondPath} (`);
     expect(leafPrompt).toContain(`--- BEGIN SOURCE 1: ${firstPath} ---`);
@@ -837,31 +1097,39 @@ time.sleep(30)
     expect(leafPrompt).toContain("SECOND_SECRET_CONTENT");
     expect(JSON.stringify(result.details)).not.toContain("FIRST_SECRET_CONTENT");
     expect(JSON.stringify(result.details)).not.toContain("SECOND_SECRET_CONTENT");
-    expect(result.content[0]!.text).not.toContain("FIRST_SECRET_CONTENT");
-    expect(result.content[0]!.text).not.toContain("SECOND_SECRET_CONTENT");
+    const visibleText = firstContentText(result);
+    expect(visibleText).not.toContain("FIRST_SECRET_CONTENT");
+    expect(visibleText).not.toContain("SECOND_SECRET_CONTENT");
   });
 
   it("rejects requests that mix contextPath and contextPaths before execution", async () => {
-    const result = await executeLambdaRlmTool({ contextPath: "one.txt", contextPaths: ["two.txt"], question: "What?" });
+    const result = await executeLambdaRlmTool({
+      contextPath: "one.txt",
+      contextPaths: ["two.txt"],
+      question: "What?",
+    });
 
     expect(result.details).toMatchObject({
+      error: { code: "mixed_context_path_fields", field: "contextPaths", type: "validation" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
       ok: false,
       runStatus: "validation_failed",
-      error: { type: "validation", code: "mixed_context_path_fields", field: "contextPaths" },
-      execution: { executionStarted: false, partialDetailsAvailable: false },
     });
   });
 
   it("fails before execution when one contextPaths entry is missing", async () => {
     const existing = await tempContextFile("exists");
 
-    const result = await executeLambdaRlmTool({ contextPaths: [existing, "/definitely/missing/multi.txt"], question: "What?" });
+    const result = await executeLambdaRlmTool({
+      contextPaths: [existing, "/definitely/missing/multi.txt"],
+      question: "What?",
+    });
 
     expect(result.details).toMatchObject({
+      error: { code: "missing_context_path_file", field: "contextPaths", type: "validation" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
       ok: false,
       runStatus: "validation_failed",
-      error: { type: "validation", code: "missing_context_path_file", field: "contextPaths" },
-      execution: { executionStarted: false, partialDetailsAvailable: false },
     });
     expect(result.details).not.toHaveProperty("partialRun");
   });
@@ -873,10 +1141,10 @@ time.sleep(30)
     const result = await executeLambdaRlmTool({ contextPaths: [existing, dir], question: "What?" });
 
     expect(result.details).toMatchObject({
+      error: { code: "unreadable_context_path", field: "contextPaths", type: "validation" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
       ok: false,
       runStatus: "validation_failed",
-      error: { type: "validation", code: "unreadable_context_path", field: "contextPaths" },
-      execution: { executionStarted: false, partialDetailsAvailable: false },
     });
   });
 
@@ -886,32 +1154,48 @@ time.sleep(30)
     let bridgeStarted = false;
 
     const result = await executeLambdaRlmTool(
-      { contextPaths: [first, second], question: "Too large?", maxInputBytes: 9 },
-      { leafProcessRunner: async () => { bridgeStarted = true; return { exitCode: 0, stdout: "", stderr: "" }; } },
+      { contextPaths: [first, second], maxInputBytes: 9, question: "Too large?" },
+      {
+        leafProcessRunner: () => {
+          bridgeStarted = true;
+          return { exitCode: 0, stderr: "", stdout: "" };
+        },
+      },
     );
 
-    expect(bridgeStarted).toBe(false);
+    expect(bridgeStarted).toBeFalsy();
     expect(result.details).toMatchObject({
+      error: { code: "max_input_bytes_exceeded", field: "contextPaths", type: "validation" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
       ok: false,
       runStatus: "validation_failed",
-      error: { type: "validation", code: "max_input_bytes_exceeded", field: "contextPaths" },
-      execution: { executionStarted: false, partialDetailsAvailable: false },
     });
   });
 
   it("uses one consolidated bridge request for multiple contextPaths", async () => {
-    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3\nimport json, sys\nrequest = json.loads(sys.stdin.readline())\ncontext = request["input"].get("context", "")\nassert "--- BEGIN SOURCE 1:" in context and "--- BEGIN SOURCE 2:" in context\nassert request["input"]["question"] == "Consolidated?"\nprint(json.dumps({"type":"model_callback_request","runId":request["runId"],"requestId":"model-call-1","prompt":context,"metadata":{"phase":"leaf"}}), flush=True)\nresponse = json.loads(sys.stdin.readline())\nprint(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"content":"consolidated answer","modelCalls":1}), flush=True)\n`);
+    const bridgePath = await tempPythonBridgeScript(
+      `#!/usr/bin/env python3\nimport json, sys\nrequest = json.loads(sys.stdin.readline())\ncontext = request["input"].get("context", "")\nassert "--- BEGIN SOURCE 1:" in context and "--- BEGIN SOURCE 2:" in context\nassert request["input"]["question"] == "Consolidated?"\nprint(json.dumps({"type":"model_callback_request","runId":request["runId"],"requestId":"model-call-1","prompt":context,"metadata":{"phase":"leaf"}}), flush=True)\nresponse = json.loads(sys.stdin.readline())\nprint(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"content":"consolidated answer","modelCalls":1}), flush=True)\n`,
+    );
     const first = await tempContextFile("alpha");
     const second = await tempContextFile("beta");
     let leafCalls = 0;
 
     const result = await executeLambdaRlmTool(
       { contextPaths: [first, second], question: "Consolidated?" },
-      { bridgePath, leafProcessRunner: async () => { leafCalls += 1; return { exitCode: 0, stdout: "ok\n", stderr: "" }; } },
+      {
+        bridgePath,
+        leafProcessRunner: () => {
+          leafCalls += 1;
+          return { exitCode: 0, stderr: "", stdout: "ok\n" };
+        },
+      },
     );
 
     expect(leafCalls).toBe(1);
-    expect(result.details).toMatchObject({ ok: true, bridgeRun: { finalResults: 1, childPiLeafCalls: 1 } });
+    expect(result.details).toMatchObject({
+      bridgeRun: { childPiLeafCalls: 1, finalResults: 1 },
+      ok: true,
+    });
   });
 
   it("returns structured cancellation failure and aborts the active leaf through the tool boundary", async () => {
@@ -921,40 +1205,48 @@ time.sleep(30)
     const promise = executeLambdaRlmTool(
       { contextPath, question: "Cancel?" },
       {
+        leafProcessRunner: async (invocation) => {
+          const result = resolveOnAbort(invocation.signal, {
+            exitCode: null,
+            signal: "SIGTERM",
+            stderr: "cancelled",
+            stdout: "",
+          });
+          setTimeout(() => controller.abort(), 0);
+          const processResult = await result;
+          observedAbort = true;
+          return processResult;
+        },
         signal: controller.signal,
-        leafProcessRunner: (invocation) =>
-          new Promise((resolve) => {
-            invocation.signal?.addEventListener("abort", () => {
-              observedAbort = true;
-              resolve({ exitCode: null, signal: "SIGTERM", stdout: "", stderr: "cancelled" });
-            });
-            setTimeout(() => controller.abort(), 0);
-          }),
       },
     );
 
     const result = await promise;
 
-    expect(observedAbort).toBe(true);
+    expect(observedAbort).toBeTruthy();
     expect(result.details).toMatchObject({
-      ok: false,
-      runStatus: "runtime_failed",
       authoritativeAnswerAvailable: false,
       error: { code: "run_cancelled" },
+      ok: false,
       partialRun: { executionStarted: true, partialDetailsAvailable: true },
+      runStatus: "runtime_failed",
     });
   });
 
   it("rejects per-run loosening with a structured pre-execution validation failure", async () => {
     const contextPath = await tempContextFile("short source");
 
-    const result = await executeLambdaRlmTool({ contextPath, question: "Loosen?", maxInputBytes: 999999999 });
+    const result = await executeLambdaRlmTool({
+      contextPath,
+      maxInputBytes: 999_999_999,
+      question: "Loosen?",
+    });
 
     expect(result.details).toMatchObject({
+      error: { code: "per_run_limit_loosened", field: "maxInputBytes", type: "validation" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
       ok: false,
       runStatus: "validation_failed",
-      error: { type: "validation", code: "per_run_limit_loosened", field: "maxInputBytes" },
-      execution: { executionStarted: false, partialDetailsAvailable: false },
     });
   });
 
@@ -966,23 +1258,33 @@ time.sleep(30)
     const result = await executeLambdaRlmTool(
       { contextPath, question: "Produce long output" },
       {
-        outputMaxVisibleChars: 180,
         fullOutputDir,
         leafProcessRunner: async (invocation) => {
           const promptFile = invocation.args.at(-1);
-          const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
-          return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : `${longAnswer}\n`, stderr: "" };
+          const prompt = promptFile?.startsWith("@")
+            ? await readFile(promptFile.slice(1), "utf-8")
+            : "";
+          return {
+            exitCode: 0,
+            stdout: prompt.includes("Single digit:") ? "2\n" : `${longAnswer}\n`,
+            stderr: "",
+          };
         },
+        outputMaxVisibleChars: 180,
       },
     );
 
-    expect(result.content[0]!.text.length).toBeLessThanOrEqual(180);
-    expect(result.content[0]!.text).toContain("truncated");
-    expect(result.content[0]!.text).toContain("Run summary: Real Lambda-RLM completed");
-    expect(result.content[0]!.text).toContain("Model calls:");
-    expect(result.details).toMatchObject({ ok: true, output: { truncated: true, maxVisibleChars: 180 } });
-    const fullOutputPath = (result.details.output as any).fullOutputPath;
-    expect(fullOutputPath).toEqual(expect.stringContaining(fullOutputDir));
-    await expect(readFile(fullOutputPath, "utf8")).resolves.toContain(longAnswer);
+    const visibleText = firstContentText(result);
+    expect(visibleText.length).toBeLessThanOrEqual(180);
+    expect(visibleText).toContain("truncated");
+    expect(visibleText).toContain("Run summary: Real Lambda-RLM completed");
+    expect(visibleText).toContain("Model calls:");
+    expect(result.details).toMatchObject({
+      ok: true,
+      output: { maxVisibleChars: 180, truncated: true },
+    });
+    const outputPath = fullOutputPath(result);
+    expect(outputPath).toStrictEqual(expect.stringContaining(fullOutputDir));
+    await expect(readFile(outputPath, "utf-8")).resolves.toContain(longAnswer);
   });
 });

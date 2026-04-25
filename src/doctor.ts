@@ -1,28 +1,30 @@
 import { fileURLToPath } from "node:url";
-import { join } from "node:path";
-import { buildFormalPiLeafCommand, nodeProcessRunner, type ProcessRunner } from "./leafRunner.js";
-import { resolvePromptBundle } from "./promptResolver.js";
-import { resolveRunConfig } from "./configResolver.js";
-import { runSyntheticBridge } from "./bridgeRunner.js";
+import { buildFormalPiLeafCommand, nodeProcessRunner } from "./leaf-runner.js";
+import type { Awaitable, ProcessRunner } from "./leaf-runner.js";
+import { resolvePromptBundle } from "./prompt-resolver.js";
+import { resolveRunConfig } from "./config-resolver.js";
+import { runSyntheticBridge } from "./bridge-runner.js";
 
 export type DoctorStatus = "ok" | "warn" | "error";
 
-export type DoctorCheck = {
+export interface DoctorCheck {
   name: string;
   status: DoctorStatus;
   message: string;
   details?: Record<string, unknown>;
   remediation?: string;
-};
+}
 
-export type DoctorReport = {
+export interface DoctorReport {
   ok: boolean;
   checks: DoctorCheck[];
-};
+}
 
-type MockBridgeResult = { ok: true; message: string; details?: Record<string, unknown> } | { ok: false; message: string; details?: Record<string, unknown> };
+type MockBridgeResult =
+  | { ok: true; message: string; details?: Record<string, unknown> }
+  | { ok: false; message: string; details?: Record<string, unknown> };
 
-export type DoctorOptions = {
+export interface DoctorOptions {
   cwd?: string;
   homeDir?: string;
   pythonPath?: string;
@@ -34,11 +36,23 @@ export type DoctorOptions = {
   globalPromptDir?: string;
   projectPromptDir?: string;
   bridgePath?: string;
-  mockBridgeRunner?: () => Promise<MockBridgeResult>;
-};
+  mockBridgeRunner?: () => Awaitable<MockBridgeResult>;
+}
 
-function check(name: string, status: DoctorStatus, message: string, details?: Record<string, unknown>, remediation?: string): DoctorCheck {
-  return { name, status, message, ...(details ? { details } : {}), ...(remediation ? { remediation } : {}) };
+function check(
+  name: string,
+  status: DoctorStatus,
+  message: string,
+  details?: Record<string, unknown>,
+  remediation?: string,
+): DoctorCheck {
+  return {
+    message,
+    name,
+    status,
+    ...(details ? { details } : {}),
+    ...(remediation ? { remediation } : {}),
+  };
 }
 
 function defaultBridgePath() {
@@ -50,10 +64,15 @@ function vendoredRlmPath() {
 }
 
 function firstLine(text: string) {
-  return text.split(/\r?\n/).find((line) => line.trim())?.trim() ?? "";
+  return (
+    text
+      .split(/\r?\n/)
+      .find((line) => line.trim())
+      ?.trim() ?? ""
+  );
 }
 
-async function runPythonSeamProbe(processRunner: ProcessRunner, pythonPath: string) {
+function runPythonSeamProbe(processRunner: ProcessRunner, pythonPath: string) {
   const script = String.raw`
 import inspect, json, sys
 sys.path.insert(0, ${JSON.stringify(vendoredRlmPath())})
@@ -82,7 +101,7 @@ except Exception as exc:
     print(json.dumps({'ok': False, 'error': str(exc), 'missing': ['rlm import']}))
     sys.exit(1)
 `;
-  return processRunner({ command: pythonPath, args: ["-c", script] });
+  return processRunner({ args: ["-c", script], command: pythonPath });
 }
 
 function parseProbe(stdout: string): Record<string, unknown> {
@@ -95,63 +114,117 @@ function parseProbe(stdout: string): Record<string, unknown> {
 }
 
 function verifyFormalLeafCommand(piExecutable: string) {
-  const command = buildFormalPiLeafCommand({ piExecutable, promptFilePath: "/tmp/lambda-rlm-doctor-prompt.txt", leafModel: "doctor-mock" });
-  const requiredFlags = ["--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--no-session"];
+  const command = buildFormalPiLeafCommand({
+    leafModel: "doctor-mock",
+    piExecutable,
+    promptFilePath: "/tmp/lambda-rlm-doctor-prompt.txt",
+  });
+  const requiredFlags = [
+    "--no-tools",
+    "--no-extensions",
+    "--no-skills",
+    "--no-context-files",
+    "--no-prompt-templates",
+    "--no-session",
+  ];
   const missingFlags = requiredFlags.filter((flag) => !command.args.includes(flag));
-  return { command, requiredFlags, missingFlags, requiredFlagsPresent: missingFlags.length === 0 };
+  return { command, missingFlags, requiredFlags, requiredFlagsPresent: missingFlags.length === 0 };
 }
 
-async function defaultMockBridgeRunner(options: Required<Pick<DoctorOptions, "bridgePath" | "pythonPath">>) {
+async function defaultMockBridgeRunner(
+  options: Required<Pick<DoctorOptions, "bridgePath" | "pythonPath">>,
+) {
   const result = await runSyntheticBridge({
     bridgePath: options.bridgePath,
-    pythonPath: options.pythonPath,
-    runId: "doctor-mock",
-    contextPath: "doctor-inline-context.txt",
-    question: "Return the mock answer.",
     context: "The doctor mock path must not require provider credentials.",
+    contextPath: "doctor-inline-context.txt",
     contextWindowChars: 10_000,
     maxModelCalls: 4,
-    modelCallRunner: async (call) => ({
+    modelCallRunner: (call) => ({
+      content: String(call.prompt).includes("Single digit:") ? "2" : "doctor mock answer",
+      diagnostics: { exitCode: 0, stderr: "", stdoutChars: 18 },
       ok: true,
       requestId: call.requestId,
-      content: String(call.prompt).includes("Single digit:") ? "2" : "doctor mock answer",
-      diagnostics: { stdoutChars: 18, stderr: "", exitCode: 0 },
     }),
+    pythonPath: options.pythonPath,
+    question: "Return the mock answer.",
+    runId: "doctor-mock",
   });
-  return { ok: true as const, message: "mock bridge completed without model credentials", details: { modelCalls: result.modelCalls } };
+  return {
+    details: { modelCalls: result.modelCalls },
+    message: "mock bridge completed without model credentials",
+    ok: true as const,
+  };
 }
 
-export async function runLambdaRlmDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
-  const cwd = options.cwd ?? process.cwd();
-  const pythonPath = options.pythonPath ?? "python3";
-  const piExecutable = options.piExecutable ?? "pi";
-  const bridgePath = options.bridgePath ?? defaultBridgePath();
-  const processRunner = options.processRunner ?? nodeProcessRunner;
-  const checks: DoctorCheck[] = [];
-
-  const pythonVersion = await processRunner({ command: pythonPath, args: ["--version"] }).catch((error) => ({ exitCode: null, stdout: "", stderr: String(error) }));
+async function pythonVersionCheck(processRunner: ProcessRunner, pythonPath: string) {
+  const pythonVersion = await Promise.resolve(
+    processRunner({ args: ["--version"], command: pythonPath }),
+  ).catch((error) => ({ exitCode: null, stderr: String(error), stdout: "" }));
   if (pythonVersion.exitCode === 0) {
-    checks.push(check("python", "ok", `Python is available: ${firstLine(pythonVersion.stdout || pythonVersion.stderr) || pythonPath}.`, { pythonPath }));
-  } else {
-    checks.push(check("python", "error", `Python is not available at ${pythonPath}: ${firstLine(pythonVersion.stderr) || "command failed"}.`, { pythonPath, exitCode: pythonVersion.exitCode }, "Install or configure a working python3 executable; doctor does not install Python automatically."));
+    return check(
+      "python",
+      "ok",
+      `Python is available: ${firstLine(pythonVersion.stdout || pythonVersion.stderr) || pythonPath}.`,
+      { pythonPath },
+    );
   }
+  return check(
+    "python",
+    "error",
+    `Python is not available at ${pythonPath}: ${firstLine(pythonVersion.stderr) || "command failed"}.`,
+    { exitCode: pythonVersion.exitCode, pythonPath },
+    "Install or configure a working python3 executable; doctor does not install Python automatically.",
+  );
+}
 
-  const seamProbe = await runPythonSeamProbe(processRunner, pythonPath).catch((error) => ({ exitCode: null, stdout: "", stderr: String(error) }));
+async function lambdaRlmDependencyChecks(processRunner: ProcessRunner, pythonPath: string) {
+  const seamProbe = await Promise.resolve(runPythonSeamProbe(processRunner, pythonPath)).catch(
+    (error) => ({
+      exitCode: null,
+      stderr: String(error),
+      stdout: "",
+    }),
+  );
   const probe = parseProbe(seamProbe.stdout);
-  if (seamProbe.exitCode !== 0) {
-    const reason = probe.error ? String(probe.error) : firstLine(seamProbe.stderr) || "Python probe failed";
-    checks.push(check("lambda_rlm_dependency", "error", `Vendored Lambda-RLM dependency is not importable: ${reason}.`, { pythonPath, stderr: seamProbe.stderr }, "Restore the vendored .pi/extensions/lambda-rlm/rlm package or configure Python so the vendored package imports; doctor will not pip install dependencies."));
-  } else {
-    checks.push(check("lambda_rlm_dependency", "ok", "Vendored Lambda-RLM package imports under the selected Python.", { pythonPath }));
-  }
+  const dependencyCheck =
+    seamProbe.exitCode === 0
+      ? check(
+          "lambda_rlm_dependency",
+          "ok",
+          "Vendored Lambda-RLM package imports under the selected Python.",
+          { pythonPath },
+        )
+      : check(
+          "lambda_rlm_dependency",
+          "error",
+          `Vendored Lambda-RLM dependency is not importable: ${
+            probe.error ? String(probe.error) : firstLine(seamProbe.stderr) || "Python probe failed"
+          }.`,
+          { pythonPath, stderr: seamProbe.stderr },
+          "Restore the vendored .pi/extensions/lambda-rlm/rlm package or configure Python so the vendored package imports; doctor will not pip install dependencies.",
+        );
 
-  if (probe.ok === true) {
-    checks.push(check("lambda_rlm_fork_seams", "ok", "Local/forked Lambda-RLM exposes required client, prompt registry, and metadata seams.", { seams: probe.seams }));
-  } else {
-    const missing = Array.isArray(probe.missing) ? probe.missing.map(String) : ["unknown seam"];
-    checks.push(check("lambda_rlm_fork_seams", "error", `Local/forked Lambda-RLM is missing required seam(s): ${missing.join(", ")}.`, { missing, stderr: seamProbe.stderr }, "Use the local/forked Lambda-RLM patch that supports injected clients, LambdaPromptRegistry bridge bundles, and explicit model-call metadata."));
-  }
+  const missing = Array.isArray(probe.missing) ? probe.missing.map(String) : ["unknown seam"];
+  const seamCheck =
+    probe.ok === true
+      ? check(
+          "lambda_rlm_fork_seams",
+          "ok",
+          "Local/forked Lambda-RLM exposes required client, prompt registry, and metadata seams.",
+          { seams: probe.seams },
+        )
+      : check(
+          "lambda_rlm_fork_seams",
+          "error",
+          `Local/forked Lambda-RLM is missing required seam(s): ${missing.join(", ")}.`,
+          { missing, stderr: seamProbe.stderr },
+          "Use the local/forked Lambda-RLM patch that supports injected clients, LambdaPromptRegistry bridge bundles, and explicit model-call metadata.",
+        );
+  return [dependencyCheck, seamCheck];
+}
 
+async function configCheck(options: DoctorOptions, cwd: string) {
   const configResult = await resolveRunConfig({
     cwd,
     ...(options.homeDir ? { homeDir: options.homeDir } : {}),
@@ -159,11 +232,20 @@ export async function runLambdaRlmDoctor(options: DoctorOptions = {}): Promise<D
     ...(options.projectConfigPath ? { projectConfigPath: options.projectConfigPath } : {}),
   });
   if (configResult.ok) {
-    checks.push(check("config", "ok", "Resolved TOML configuration is valid.", { config: configResult.config }));
-  } else {
-    checks.push(check("config", "error", configResult.error.message, { code: configResult.error.code, field: configResult.error.field }, "Fix ~/.pi/lambda-rlm/config.toml or <project>/.pi/lambda-rlm/config.toml; use positive integer [run] keys only."));
+    return check("config", "ok", "Resolved TOML configuration is valid.", {
+      config: configResult.config,
+    });
   }
+  return check(
+    "config",
+    "error",
+    configResult.error.message,
+    { code: configResult.error.code, field: configResult.error.field },
+    "Fix ~/.pi/lambda-rlm/config.toml or <project>/.pi/lambda-rlm/config.toml; use positive integer [run] keys only.",
+  );
+}
 
+async function promptsCheck(options: DoctorOptions, cwd: string) {
   const promptResult = await resolvePromptBundle({
     cwd,
     ...(options.homeDir ? { homeDir: options.homeDir } : {}),
@@ -172,32 +254,98 @@ export async function runLambdaRlmDoctor(options: DoctorOptions = {}): Promise<D
     ...(options.projectPromptDir ? { projectPromptDir: options.projectPromptDir } : {}),
   });
   if (promptResult.ok) {
-    checks.push(check("prompts", "ok", "Prompt overlays resolved and placeholder rules validated.", { promptCount: Object.keys(promptResult.bundle.prompts).length }));
-  } else {
-    checks.push(check("prompts", "error", promptResult.error.message, { code: promptResult.error.code, field: promptResult.error.field }, "Fix the prompt overlay Markdown file or remove the invalid overlay; doctor will not auto-seed or mutate prompt overlays."));
+    return check("prompts", "ok", "Prompt overlays resolved and placeholder rules validated.", {
+      promptCount: Object.keys(promptResult.bundle.prompts).length,
+    });
   }
+  return check(
+    "prompts",
+    "error",
+    promptResult.error.message,
+    { code: promptResult.error.code, field: promptResult.error.field },
+    "Fix the prompt overlay Markdown file or remove the invalid overlay; doctor will not auto-seed or mutate prompt overlays.",
+  );
+}
 
-  const piVersion = await processRunner({ command: piExecutable, args: ["--version"] }).catch((error) => ({ exitCode: null, stdout: "", stderr: String(error) }));
+async function piExecutableCheck(processRunner: ProcessRunner, piExecutable: string) {
+  const piVersion = await Promise.resolve(
+    processRunner({ args: ["--version"], command: piExecutable }),
+  ).catch((error) => ({ exitCode: null, stderr: String(error), stdout: "" }));
   if (piVersion.exitCode === 0) {
-    checks.push(check("pi_executable", "ok", `Pi executable is available: ${firstLine(piVersion.stdout || piVersion.stderr) || piExecutable}.`, { piExecutable }));
-  } else {
-    checks.push(check("pi_executable", "error", `Pi executable is not available at ${piExecutable}: ${firstLine(piVersion.stderr) || "command failed"}.`, { piExecutable, exitCode: piVersion.exitCode }, "Install Pi or configure the pi executable path before real Formal Leaf calls; doctor does not install Pi."));
+    return check(
+      "pi_executable",
+      "ok",
+      `Pi executable is available: ${firstLine(piVersion.stdout || piVersion.stderr) || piExecutable}.`,
+      { piExecutable },
+    );
   }
+  return check(
+    "pi_executable",
+    "error",
+    `Pi executable is not available at ${piExecutable}: ${firstLine(piVersion.stderr) || "command failed"}.`,
+    { exitCode: piVersion.exitCode, piExecutable },
+    "Install Pi or configure the pi executable path before real Formal Leaf calls; doctor does not install Pi.",
+  );
+}
 
+function formalLeafCommandCheck(piExecutable: string) {
   const commandShape = verifyFormalLeafCommand(piExecutable);
-  checks.push(
-    commandShape.requiredFlagsPresent
-      ? check("formal_leaf_command", "ok", "Formal Leaf child command includes required no-tools/no-extensions/no-skills/no-context/no-prompt/no-session flags.", commandShape)
-      : check("formal_leaf_command", "error", `Formal Leaf child command is missing required flag(s): ${commandShape.missingFlags.join(", ")}.`, commandShape, "Update buildFormalPiLeafCommand so all Formal Leaf Profile disabling flags are present."),
+  if (commandShape.requiredFlagsPresent) {
+    return check(
+      "formal_leaf_command",
+      "ok",
+      "Formal Leaf child command includes required no-tools/no-extensions/no-skills/no-context/no-prompt/no-session flags.",
+      commandShape,
+    );
+  }
+  return check(
+    "formal_leaf_command",
+    "error",
+    `Formal Leaf child command is missing required flag(s): ${commandShape.missingFlags.join(", ")}.`,
+    commandShape,
+    "Update buildFormalPiLeafCommand so all Formal Leaf Profile disabling flags are present.",
   );
+}
 
-  const mockBridgeRunner = options.mockBridgeRunner ?? (() => defaultMockBridgeRunner({ bridgePath, pythonPath }));
-  const mock = await mockBridgeRunner().catch((error) => ({ ok: false as const, message: String(error), details: {} }));
-  checks.push(
-    mock.ok
-      ? check("mock_bridge", "ok", mock.message, mock.details)
-      : check("mock_bridge", "error", mock.message, mock.details, "Fix the bridge/tool callback contract. This check uses deterministic fake leaf responses and should not need provider credentials."),
+async function mockBridgeCheck(
+  options: Pick<DoctorOptions, "mockBridgeRunner">,
+  bridgePath: string,
+  pythonPath: string,
+) {
+  const mockBridgeRunner =
+    options.mockBridgeRunner ?? (() => defaultMockBridgeRunner({ bridgePath, pythonPath }));
+  const mock = await Promise.resolve(mockBridgeRunner()).catch((error) => ({
+    details: {},
+    message: String(error),
+    ok: false as const,
+  }));
+  if (mock.ok) {
+    return check("mock_bridge", "ok", mock.message, mock.details);
+  }
+  return check(
+    "mock_bridge",
+    "error",
+    mock.message,
+    mock.details,
+    "Fix the bridge/tool callback contract. This check uses deterministic fake leaf responses and should not need provider credentials.",
   );
+}
 
-  return { ok: checks.every((entry) => entry.status !== "error"), checks };
+export async function runLambdaRlmDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
+  const cwd = options.cwd ?? process.cwd();
+  const pythonPath = options.pythonPath ?? "python3";
+  const piExecutable = options.piExecutable ?? "pi";
+  const bridgePath = options.bridgePath ?? defaultBridgePath();
+  const processRunner = options.processRunner ?? nodeProcessRunner;
+  const checks = [
+    await pythonVersionCheck(processRunner, pythonPath),
+    ...(await lambdaRlmDependencyChecks(processRunner, pythonPath)),
+    await configCheck(options, cwd),
+    await promptsCheck(options, cwd),
+    await piExecutableCheck(processRunner, piExecutable),
+    formalLeafCommandCheck(piExecutable),
+    await mockBridgeCheck(options, bridgePath, pythonPath),
+  ];
+
+  return { checks, ok: checks.every((entry) => entry.status !== "error") };
 }

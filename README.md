@@ -291,12 +291,12 @@ A failed run marks the answer as non-authoritative. Validation failures happen b
 ```text
 src/
   extension.ts          # Pi extension registration, tool schema, doctor command
-  lambdaRlmTool.ts      # public tool validation, source loading, config/prompt resolution
-  bridgeRunner.ts       # NDJSON bridge process orchestration
-  leafRunner.ts         # constrained child Pi Formal Leaf calls
-  configResolver.ts     # sparse TOML config overlays
-  promptResolver.ts     # built-in/global/project prompt overlays
-  resultFormatter.ts    # bounded visible output and structured details
+  lambda-rlm-tool.ts    # public tool validation, source loading, config/prompt resolution
+  bridge-runner.ts      # NDJSON bridge process orchestration
+  leaf-runner.ts        # constrained child Pi Formal Leaf calls
+  config-resolver.ts    # sparse TOML config overlays
+  prompt-resolver.ts    # built-in/global/project prompt overlays
+  result-formatter.ts   # bounded visible output and structured details
 
 .pi/extensions/lambda-rlm/
   index.ts              # project-local extension entrypoint

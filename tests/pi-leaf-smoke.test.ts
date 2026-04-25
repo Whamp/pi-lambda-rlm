@@ -2,8 +2,8 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { executeLambdaRlmTool as executeLambdaRlmToolRaw } from "../src/lambdaRlmTool.js";
-import { runFormalPiLeafModelCall } from "../src/leafRunner.js";
+import { executeLambdaRlmTool as executeLambdaRlmToolRaw } from "../src/lambda-rlm-tool.js";
+import { runFormalPiLeafModelCall } from "../src/leaf-runner.js";
 
 const runSmoke = process.env.PI_LAMBDA_RLM_LEAF_SMOKE === "1";
 const leafModel = process.env.LAMBDA_RLM_LEAF_MODEL;
@@ -11,13 +11,22 @@ const leafModel = process.env.LAMBDA_RLM_LEAF_MODEL;
 async function tempContextFile(content: string) {
   const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-real-smoke-"));
   const path = join(dir, "context.txt");
-  await writeFile(path, content, "utf8");
+  await writeFile(path, content, "utf-8");
   return path;
 }
 
-async function executeLambdaRlmTool(params: unknown, options: Parameters<typeof executeLambdaRlmToolRaw>[1] = {}) {
-  const isolatedHome = options.homeDir || options.globalConfigPath ? undefined : await mkdtemp(join(tmpdir(), "lambda-rlm-isolated-home-"));
-  return executeLambdaRlmToolRaw(params, { ...(isolatedHome ? { homeDir: isolatedHome } : {}), ...options });
+async function executeLambdaRlmTool(
+  params: unknown,
+  options: Parameters<typeof executeLambdaRlmToolRaw>[1] = {},
+) {
+  const isolatedHome =
+    options.homeDir || options.globalConfigPath
+      ? undefined
+      : await mkdtemp(join(tmpdir(), "lambda-rlm-isolated-home-"));
+  return executeLambdaRlmToolRaw(params, {
+    ...(isolatedHome ? { homeDir: isolatedHome } : {}),
+    ...options,
+  });
 }
 
 describe.runIf(runSmoke)("gated real pi -p Formal Leaf smoke", () => {
@@ -27,11 +36,11 @@ describe.runIf(runSmoke)("gated real pi -p Formal Leaf smoke", () => {
     }
 
     const result = await runFormalPiLeafModelCall(
-      { requestId: "smoke-1", prompt: "Reply with exactly: leaf smoke ok" },
+      { prompt: "Reply with exactly: leaf smoke ok", requestId: "smoke-1" },
       { leafModel, leafThinking: "off", timeoutMs: 120_000 },
     );
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBeTruthy();
     expect(result.content.trim().length).toBeGreaterThan(0);
   });
 
@@ -49,17 +58,17 @@ describe.runIf(runSmoke)("gated real pi -p Formal Leaf smoke", () => {
     const text = result.content[0]?.text ?? "";
     expect(text.trim().length).toBeGreaterThan(0);
     expect(result.details).toMatchObject({
-      ok: true,
       bridgeRun: {
-        realLambdaRlm: true,
         leafProfile: "formal_pi_print",
+        realLambdaRlm: true,
       },
+      ok: true,
     });
   }, 180_000);
 });
 
-describe.skipIf(runSmoke)("gated real pi -p Formal Leaf smoke", () => {
+describe.skipIf(runSmoke)("skipped real pi -p Formal Leaf smoke", () => {
   it("skips unless PI_LAMBDA_RLM_LEAF_SMOKE=1 is set", () => {
-    expect(runSmoke).toBe(false);
+    expect(runSmoke).toBeFalsy();
   });
 });

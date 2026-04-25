@@ -2,24 +2,33 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import {
   FORMAL_LEAF_SYSTEM_PROMPT,
-  LeafProcessFailure,
   buildFormalPiLeafCommand,
   runFormalPiLeafModelCall,
-  type ProcessRunner,
-} from "../src/leafRunner.js";
+} from "../src/leaf-runner.js";
+import type { ProcessResult, ProcessRunner } from "../src/leaf-runner.js";
+
+function resolveOnAbort(
+  signal: AbortSignal | undefined,
+  result: ProcessResult,
+): Promise<ProcessResult> {
+  // AbortSignal is EventTarget-based; a one-shot promise is the clearest test seam.
+  // oxlint-disable-next-line promise/avoid-new
+  return new Promise((resolve) => {
+    signal?.addEventListener("abort", () => resolve(result), { once: true });
+  });
+}
 
 describe("Formal Pi leaf runner", () => {
   it("constructs a constrained pi -p command for the Formal Leaf Profile", () => {
     const command = buildFormalPiLeafCommand({
-      piExecutable: "pi",
-      promptFilePath: "/tmp/leaf-prompt.txt",
       leafModel: "google/gemini-test",
       leafThinking: "off",
+      piExecutable: "pi",
+      promptFilePath: "/tmp/leaf-prompt.txt",
       systemPrompt: FORMAL_LEAF_SYSTEM_PROMPT,
     });
 
-    expect(command).toEqual({
-      command: "pi",
+    expect(command).toStrictEqual({
       args: [
         "--print",
         "--mode",
@@ -38,6 +47,7 @@ describe("Formal Pi leaf runner", () => {
         "--no-prompt-templates",
         "@/tmp/leaf-prompt.txt",
       ],
+      command: "pi",
     });
 
     expect(command.args).toContain("--no-tools");
@@ -48,50 +58,79 @@ describe("Formal Pi leaf runner", () => {
     expect(command.args).toContain("--no-session");
     expect(command.args).not.toContain("--extension");
     expect(command.args).not.toContain("-e");
-    expect(command.args.at(-1)).toEqual("@/tmp/leaf-prompt.txt");
+    expect(command.args.at(-1)).toBe("@/tmp/leaf-prompt.txt");
   });
 
   it("services one model callback through a mock process runner and temp prompt file", async () => {
-    const calls: Array<{ command: string; args: string[]; promptFileContent: string }> = [];
+    const calls: { command: string; args: string[]; promptFileContent: string }[] = [];
     const processRunner: ProcessRunner = async (invocation) => {
       const promptFileArg = invocation.args.at(-1);
-      if (!promptFileArg?.startsWith("@")) throw new Error("missing @ prompt file arg");
+      if (!promptFileArg?.startsWith("@")) {
+        throw new Error("missing @ prompt file arg");
+      }
       calls.push({
-        command: invocation.command,
         args: invocation.args,
-        promptFileContent: await readFile(promptFileArg.slice(1), "utf8"),
+        command: invocation.command,
+        promptFileContent: await readFile(promptFileArg.slice(1), "utf-8"),
       });
-      return { exitCode: 0, stdout: "leaf answer\n", stderr: "leaf diagnostics\n" };
+      return { exitCode: 0, stderr: "leaf diagnostics\n", stdout: "leaf answer\n" };
     };
 
     const result = await runFormalPiLeafModelCall(
-      { requestId: "model-call-1", prompt: "Large rendered Lambda-RLM prompt" },
+      { prompt: "Large rendered Lambda-RLM prompt", requestId: "model-call-1" },
       { leafModel: "google/gemini-test", leafThinking: "low", piExecutable: "pi", processRunner },
     );
 
-    expect(result).toMatchObject({ ok: true, requestId: "model-call-1", content: "leaf answer" });
+    expect(result).toMatchObject({ content: "leaf answer", ok: true, requestId: "model-call-1" });
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({ command: "pi", promptFileContent: "Large rendered Lambda-RLM prompt" });
-    expect(calls[0]?.args).toEqual(expect.arrayContaining(["--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates"]));
+    expect(calls[0]).toMatchObject({
+      command: "pi",
+      promptFileContent: "Large rendered Lambda-RLM prompt",
+    });
+    expect(calls[0]?.args).toStrictEqual(
+      expect.arrayContaining([
+        "--no-tools",
+        "--no-extensions",
+        "--no-skills",
+        "--no-context-files",
+        "--no-prompt-templates",
+      ]),
+    );
   });
 
   it("returns a structured failure when the child pi process exits non-zero", async () => {
     await expect(
       runFormalPiLeafModelCall(
-        { requestId: "model-call-1", prompt: "prompt" },
+        { prompt: "prompt", requestId: "model-call-1" },
         {
           leafModel: "google/gemini-test",
-          processRunner: async () => ({ exitCode: 2, stdout: "partial stdout", stderr: "bad auth" }),
+          processRunner: () => ({
+            exitCode: 2,
+            stderr: "bad auth",
+            stdout: "partial stdout",
+          }),
         },
       ),
     ).rejects.toMatchObject({
-      name: "LeafProcessFailure",
       details: {
+        diagnostics: {
+          exitCode: 2,
+          stderr: "",
+          stderrBytes: Buffer.byteLength("bad auth", "utf-8"),
+          stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          stdout: "",
+          stdoutBytes: Buffer.byteLength("partial stdout", "utf-8"),
+          stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+        error: {
+          code: "child_exit_nonzero",
+          message: expect.stringContaining("2"),
+          type: "child_process",
+        },
         ok: false,
         requestId: "model-call-1",
-        error: { type: "child_process", code: "child_exit_nonzero", message: expect.stringContaining("2") },
-        diagnostics: { stdout: "", stderr: "", stdoutBytes: Buffer.byteLength("partial stdout", "utf8"), stderrBytes: Buffer.byteLength("bad auth", "utf8"), stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/), stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/), exitCode: 2 },
       },
+      name: "LeafProcessFailureError",
     });
   });
 
@@ -99,28 +138,40 @@ describe("Formal Pi leaf runner", () => {
     let observedAbort = false;
     await expect(
       runFormalPiLeafModelCall(
-        { requestId: "model-call-timeout", prompt: "prompt" },
+        { prompt: "prompt", requestId: "model-call-timeout" },
         {
           leafModel: "google/gemini-test",
+          processRunner: async (invocation) => {
+            const result = await resolveOnAbort(invocation.signal, {
+              exitCode: null,
+              signal: "SIGTERM",
+              stderr: "timed out",
+              stdout: "partial stdout",
+            });
+            observedAbort = true;
+            return result;
+          },
           timeoutMs: 10,
-          processRunner: (invocation) =>
-            new Promise((resolve) => {
-              invocation.signal?.addEventListener("abort", () => {
-                observedAbort = true;
-                resolve({ exitCode: null, signal: "SIGTERM", stdout: "partial stdout", stderr: "timed out" });
-              });
-            }),
         },
       ),
     ).rejects.toMatchObject({
-      name: "LeafProcessFailure",
       details: {
+        diagnostics: {
+          exitCode: null,
+          signal: "SIGTERM",
+          stderr: "",
+          stderrBytes: Buffer.byteLength("timed out", "utf-8"),
+          stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          stdout: "",
+          stdoutBytes: Buffer.byteLength("partial stdout", "utf-8"),
+          stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+        error: { code: "per_model_call_timeout", type: "child_process" },
         ok: false,
         requestId: "model-call-timeout",
-        error: { type: "child_process", code: "per_model_call_timeout" },
-        diagnostics: { stdout: "", stderr: "", stdoutBytes: Buffer.byteLength("partial stdout", "utf8"), stderrBytes: Buffer.byteLength("timed out", "utf8"), stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/), stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/), exitCode: null, signal: "SIGTERM" },
       },
+      name: "LeafProcessFailureError",
     });
-    expect(observedAbort).toBe(true);
+    expect(observedAbort).toBeTruthy();
   });
 });

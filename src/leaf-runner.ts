@@ -15,31 +15,33 @@ export const FORMAL_LEAF_SYSTEM_PROMPT = [
 
 export type LeafThinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
-export type ProcessInvocation = {
+export interface ProcessInvocation {
   command: string;
   args: string[];
   timeoutMs?: number;
   signal?: AbortSignal;
-};
+}
 
-export type ProcessResult = {
+export interface ProcessResult {
   exitCode: number | null;
   signal?: NodeJS.Signals | string | null;
   stdout: string;
   stderr: string;
-};
+}
 
-export type ProcessRunner = (invocation: ProcessInvocation) => Promise<ProcessResult>;
+export type Awaitable<T> = T | Promise<T>;
 
-export type FormalPiLeafCommandOptions = {
+export type ProcessRunner = (invocation: ProcessInvocation) => Awaitable<ProcessResult>;
+
+export interface FormalPiLeafCommandOptions {
   piExecutable?: string;
   promptFilePath: string;
   leafModel: string;
   leafThinking?: LeafThinking;
   systemPrompt?: string;
-};
+}
 
-export type FormalLeafRunOptions = {
+export interface FormalLeafRunOptions {
   piExecutable?: string;
   leafModel: string;
   leafThinking?: LeafThinking;
@@ -47,16 +49,16 @@ export type FormalLeafRunOptions = {
   timeoutMs?: number;
   signal?: AbortSignal;
   processRunner?: ProcessRunner;
-};
+}
 
-export type ModelCall = {
+export interface ModelCall {
   requestId: string;
   prompt: string;
   metadata?: Record<string, unknown>;
   signal?: AbortSignal;
-};
+}
 
-export type LeafModelCallSuccess = {
+export interface LeafModelCallSuccess {
   ok: true;
   requestId: string;
   content: string;
@@ -65,28 +67,37 @@ export type LeafModelCallSuccess = {
     stderr: string;
     exitCode: number | null;
   };
-};
+}
 
-export type LeafModelCallFailureDetails = {
+export interface LeafModelCallFailureDetails {
   ok: false;
   requestId: string;
   error: { type: "child_process"; code: string; message: string };
-  diagnostics: { stdout: string; stderr: string; exitCode: number | null; signal?: NodeJS.Signals | string | null };
-};
+  diagnostics: {
+    stdout: string;
+    stderr: string;
+    exitCode: number | null;
+    signal?: NodeJS.Signals | string | null;
+  };
+}
 
-export class LeafProcessFailure extends Error {
+export class LeafProcessFailureError extends Error {
   readonly details: LeafModelCallFailureDetails;
 
   constructor(details: LeafModelCallFailureDetails) {
     super(details.error.message);
-    this.name = "LeafProcessFailure";
+    this.name = "LeafProcessFailureError";
     this.details = details;
   }
 }
 
-export function buildFormalPiLeafCommand(options: FormalPiLeafCommandOptions): { command: string; args: string[] } {
+export { LeafProcessFailureError as LeafProcessFailure };
+
+export function buildFormalPiLeafCommand(options: FormalPiLeafCommandOptions): {
+  command: string;
+  args: string[];
+} {
   return {
-    command: options.piExecutable ?? "pi",
     args: [
       "--print",
       "--mode",
@@ -105,11 +116,14 @@ export function buildFormalPiLeafCommand(options: FormalPiLeafCommandOptions): {
       "--no-prompt-templates",
       `@${options.promptFilePath}`,
     ],
+    command: options.piExecutable ?? "pi",
   };
 }
 
-export const nodeProcessRunner: ProcessRunner = ({ command, args, timeoutMs, signal }) => {
-  return new Promise((resolve, reject) => {
+export const nodeProcessRunner: ProcessRunner = ({ command, args, timeoutMs, signal }) =>
+  // Wrapping child_process events requires constructing one boundary promise.
+  // oxlint-disable-next-line promise/avoid-new
+  new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], signal });
     let stdout = "";
     let stderr = "";
@@ -122,27 +136,62 @@ export const nodeProcessRunner: ProcessRunner = ({ command, args, timeoutMs, sig
     }
 
     child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
+      stdout += chunk.toString("utf-8");
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+      stderr += chunk.toString("utf-8");
     });
     child.on("error", (error) => {
-      if (timeout) clearTimeout(timeout);
+      if (timeout) {
+        clearTimeout(timeout);
+      }
       reject(error);
     });
     child.on("exit", (exitCode, exitSignal) => {
-      if (timeout) clearTimeout(timeout);
+      if (timeout) {
+        clearTimeout(timeout);
+      }
       resolve({ exitCode, signal: exitSignal, stdout, stderr });
     });
   });
-};
 
 function trimOneTrailingNewline(text: string) {
   return text.replace(/\r?\n$/, "");
 }
 
-export async function runFormalPiLeafModelCall(call: ModelCall, options: FormalLeafRunOptions): Promise<LeafModelCallSuccess> {
+type LeafProcessFailureCode =
+  | "child_exit_nonzero"
+  | "model_call_cancelled"
+  | "per_model_call_timeout";
+
+function leafProcessFailureCode(state: { cancelled: boolean; timedOut: boolean }) {
+  if (state.timedOut) {
+    return "per_model_call_timeout";
+  }
+  if (state.cancelled) {
+    return "model_call_cancelled";
+  }
+  return "child_exit_nonzero";
+}
+
+function leafProcessFailureMessage(
+  code: LeafProcessFailureCode,
+  timeoutMs: number | undefined,
+  result?: ProcessResult,
+) {
+  if (code === "per_model_call_timeout") {
+    return `Child pi leaf process exceeded per-model-call timeout of ${timeoutMs}ms.`;
+  }
+  if (code === "model_call_cancelled") {
+    return "Child pi leaf process was cancelled.";
+  }
+  return `Child pi leaf process exited with code ${result?.exitCode ?? "null"} signal ${result?.signal ?? "null"}.`;
+}
+
+export async function runFormalPiLeafModelCall(
+  call: ModelCall,
+  options: FormalLeafRunOptions,
+): Promise<LeafModelCallSuccess> {
   const processRunner = options.processRunner ?? nodeProcessRunner;
   const tempDir = await mkdtemp(join(tmpdir(), "pi-lambda-rlm-leaf-"));
   const promptFilePath = join(tempDir, "prompt.txt");
@@ -163,29 +212,31 @@ export async function runFormalPiLeafModelCall(call: ModelCall, options: FormalL
     }, options.timeoutMs);
   }
 
-  const failure = (code: string, message: string, result: ProcessResult = { exitCode: null, stdout: "", stderr: "" }) =>
-    new LeafProcessFailure({
-      ok: false,
-      requestId: call.requestId,
-      error: { type: "child_process", code, message },
+  const failure = (code: string, message: string, result?: ProcessResult) => {
+    const processResult = result ?? { exitCode: null, stderr: "", stdout: "" };
+    return new LeafProcessFailureError({
       diagnostics: {
         stdout: "",
         stderr: "",
-        exitCode: result.exitCode,
-        ...(result.signal !== undefined ? { signal: result.signal } : {}),
-        stdoutBytes: Buffer.byteLength(result.stdout, "utf8"),
-        stdoutSha256: diagnosticHash(result.stdout),
-        stderrBytes: Buffer.byteLength(result.stderr, "utf8"),
-        stderrSha256: diagnosticHash(result.stderr),
+        exitCode: processResult.exitCode,
+        ...(processResult.signal === undefined ? {} : { signal: processResult.signal }),
+        stdoutBytes: Buffer.byteLength(processResult.stdout, "utf-8"),
+        stdoutSha256: diagnosticHash(processResult.stdout),
+        stderrBytes: Buffer.byteLength(processResult.stderr, "utf-8"),
+        stderrSha256: diagnosticHash(processResult.stderr),
       } as LeafModelCallFailureDetails["diagnostics"],
+      error: { code, message, type: "child_process" },
+      ok: false,
+      requestId: call.requestId,
     });
+  };
 
   try {
-    await writeFile(promptFilePath, call.prompt, "utf8");
+    await writeFile(promptFilePath, call.prompt, "utf-8");
     const invocation = buildFormalPiLeafCommand({
       ...(options.piExecutable ? { piExecutable: options.piExecutable } : {}),
-      promptFilePath,
       leafModel: options.leafModel,
+      promptFilePath,
       ...(options.leafThinking ? { leafThinking: options.leafThinking } : {}),
       ...(options.systemPrompt ? { systemPrompt: options.systemPrompt } : {}),
     });
@@ -193,35 +244,40 @@ export async function runFormalPiLeafModelCall(call: ModelCall, options: FormalL
     try {
       result = await processRunner({
         ...invocation,
-        ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
         signal: controller.signal,
       });
     } catch (error) {
-      if (timedOut) throw failure("per_model_call_timeout", `Child pi leaf process exceeded per-model-call timeout of ${options.timeoutMs}ms.`);
-      if (cancelled || controller.signal.aborted) throw failure("model_call_cancelled", "Child pi leaf process was cancelled.");
+      if (timedOut || cancelled || controller.signal.aborted) {
+        const code = leafProcessFailureCode({
+          cancelled: cancelled || controller.signal.aborted,
+          timedOut,
+        });
+        throw failure(code, leafProcessFailureMessage(code, options.timeoutMs));
+      }
       throw error;
     }
 
     if (result.exitCode !== 0) {
-      const code = timedOut ? "per_model_call_timeout" : cancelled ? "model_call_cancelled" : "child_exit_nonzero";
-      const message =
-        code === "per_model_call_timeout"
-          ? `Child pi leaf process exceeded per-model-call timeout of ${options.timeoutMs}ms.`
-          : code === "model_call_cancelled"
-            ? "Child pi leaf process was cancelled."
-            : `Child pi leaf process exited with code ${result.exitCode ?? "null"} signal ${result.signal ?? "null"}.`;
-      throw failure(code, message, result);
+      const code = leafProcessFailureCode({ cancelled, timedOut });
+      throw failure(code, leafProcessFailureMessage(code, options.timeoutMs, result), result);
     }
 
     return {
+      content: trimOneTrailingNewline(result.stdout),
+      diagnostics: {
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        stdoutChars: result.stdout.length,
+      },
       ok: true,
       requestId: call.requestId,
-      content: trimOneTrailingNewline(result.stdout),
-      diagnostics: { stdoutChars: result.stdout.length, stderr: result.stderr, exitCode: result.exitCode },
     };
   } finally {
-    if (timeout) clearTimeout(timeout);
+    if (timeout) {
+      clearTimeout(timeout);
+    }
     sourceSignal?.removeEventListener("abort", onAbort);
-    await rm(tempDir, { recursive: true, force: true });
+    await rm(tempDir, { force: true, recursive: true });
   }
 }
