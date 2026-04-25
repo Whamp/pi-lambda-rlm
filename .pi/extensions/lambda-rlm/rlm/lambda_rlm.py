@@ -130,6 +130,8 @@ TASK_TEMPLATES: dict[TaskType, str] = {
     TaskType.GENERAL:        "Process the following and provide a response:\n\n{text}",
 }
 
+QA_FALLBACK_TEMPLATE = "Answer based on the following context:\n\n{text}"
+
 FILTER_RELEVANCE_TEMPLATE = (
     "Question: {query}\n\n"
     "Does this excerpt contain information relevant to answering the question?\n"
@@ -147,6 +149,45 @@ COMBINE_ANALYSIS_REDUCER_TEMPLATE = (
     "Combine these partial analyses into one comprehensive, "
     "well-structured analysis:\n\n{parts}"
 )
+
+
+_PLACEHOLDER_RE = __import__("re").compile(r"<<([A-Za-z_][A-Za-z0-9_]*)>>")
+
+
+def _render_angle_template(template: str, values: dict[str, str], *, allowed: set[str], required: set[str]) -> str:
+    found = set(_PLACEHOLDER_RE.findall(template))
+    unknown = found - allowed
+    if unknown:
+        raise ValueError(f"Unknown prompt placeholder(s): {', '.join(sorted(unknown))}")
+    missing_placeholders = required - found
+    if missing_placeholders:
+        raise ValueError(f"Prompt template is missing required placeholder(s): {', '.join(sorted(missing_placeholders))}")
+    missing_values = found - set(values)
+    if missing_values:
+        raise ValueError(f"Missing prompt render value(s): {', '.join(sorted(missing_values))}")
+    return _PLACEHOLDER_RE.sub(lambda match: values[match.group(1)], template)
+
+
+@dataclass(frozen=True)
+class LambdaPromptRegistry:
+    qa_template: str = "Using the following context, answer: <<query>>\n\nContext:\n<<text>>"
+
+    @classmethod
+    def from_bridge_bundle(cls, bundle: dict[str, Any] | None) -> "LambdaPromptRegistry":
+        if not isinstance(bundle, dict):
+            return cls()
+        prompts = bundle.get("prompts") if isinstance(bundle.get("prompts"), dict) else {}
+        qa = prompts.get("tasks/qa.md") if isinstance(prompts, dict) else None
+        template = qa.get("template") if isinstance(qa, dict) and isinstance(qa.get("template"), str) else cls().qa_template
+        registry = cls(qa_template=template)
+        registry.validate()
+        return registry
+
+    def validate(self) -> None:
+        self.render_qa(text="", query="")
+
+    def render_qa(self, *, text: str, query: str) -> str:
+        return _render_angle_template(self.qa_template, {"text": text, "query": query}, allowed={"text", "query"}, required={"text", "query"})
 
 
 # ─── Task detection prompt (Phase 2) ──────────────────────────────────────────
@@ -218,6 +259,7 @@ class LambdaRLM:
         logger:                Optional RLMLogger (currently unused, reserved for future).
         client:                Optional injected BaseLM. Local patch only; when omitted,
                                upstream get_client(backend, backend_kwargs) behavior is used.
+        prompt_registry:       Optional local patch prompt registry for resolved overlays.
     """
 
     def __init__(
@@ -234,6 +276,7 @@ class LambdaRLM:
         verbose: bool = False,
         logger: RLMLogger | None = None,
         client: BaseLM | None = None,
+        prompt_registry: LambdaPromptRegistry | None = None,
     ):
         self.backend = backend
         self.backend_kwargs = backend_kwargs or {}
@@ -247,6 +290,7 @@ class LambdaRLM:
         self.verbose = verbose
         self.logger = logger
         self.client = client
+        self.prompt_registry = prompt_registry or LambdaPromptRegistry()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -502,7 +546,7 @@ class LambdaRLM:
         """
         RegisterLibrary: inject pre-verified combinators L into repl.globals.
 
-        Registered names: _Split, _Peek, _Reduce, _FilterRelevant.
+        Registered names: _Split, _Peek, _Reduce, _FilterRelevant, _RenderQaPrompt.
         These are pure Python — no arbitrary LLM code.
         _Reduce may call repl._llm_query for merge-type operators (each call is
         a single bounded LLM invocation, not an open-ended loop).
@@ -642,6 +686,9 @@ class LambdaRLM:
             def _reduce(parts: list[str]) -> str:
                 return "\n\n".join(parts)
 
+        def _render_qa_prompt(*, text: str, query: str) -> str:
+            return self.prompt_registry.render_qa(text=text, query=query)
+
         # ── FilterRelevant(query, [(chunk, preview)]) → [chunk] ──────────────
         # Used only when pipeline.use_filter=True (QA, Extraction).
         # Each call is one bounded LLM invocation (YES/NO), not a loop.
@@ -673,6 +720,7 @@ class LambdaRLM:
         repl.globals["_Peek"]           = _peek
         repl.globals["_Reduce"]         = _reduce
         repl.globals["_FilterRelevant"] = _filter_relevant
+        repl.globals["_RenderQaPrompt"] = _render_qa_prompt
 
     # ── Internal: Phase 5b — BuildExecutor + execute ─────────────────────────
 
@@ -682,7 +730,7 @@ class LambdaRLM:
 
         Φ is defined as a recursive Python function (not LLM-generated code).
         It references only combinators already registered in repl.globals:
-          _Split, _Peek, _Reduce, _FilterRelevant  (from _register_library)
+          _Split, _Peek, _Reduce, _FilterRelevant, _RenderQaPrompt  (from _register_library)
           llm_query                                 (auto-registered by LocalREPL)
           context_0                                 (from LocalREPL.load_context)
 
@@ -710,11 +758,10 @@ class LambdaRLM:
             compose_op=plan.compose_op,
         )
         if plan.task_type == TaskType.QA and query:
-            leaf_prompt_expr = f"{repr(template)}.format(text=P, query={repr(query)})"
+            leaf_prompt_expr = f"_RenderQaPrompt(text=P, query={repr(query)})"
         elif plan.task_type == TaskType.QA:
-            # No query available — use a generic QA prompt without {query} placeholder.
-            fallback_tpl = "Answer based on the following context:\n\n{text}"
-            leaf_prompt_expr = f"{repr(fallback_tpl)}.format(text=P)"
+            # No query available — preserve the legacy generic QA fallback.
+            leaf_prompt_expr = f"{repr(QA_FALLBACK_TEMPLATE)}.format(text=P)"
         else:
             leaf_prompt_expr = f"{repr(template)}.format(text=P)"
         leaf_expr = (

@@ -10,7 +10,7 @@ sys.path.insert(0, str(EXTENSION_DIR))
 import rlm.lambda_rlm as lambda_rlm_module
 from rlm.clients import BaseLM
 from rlm.core.types import ModelUsageSummary, UsageSummary
-from rlm.lambda_rlm import LambdaRLM
+from rlm.lambda_rlm import LambdaRLM, LambdaPromptRegistry
 
 UPSTREAM_COMMIT = "3874d393483dc4299101918cf8e9af670194bd88"
 
@@ -131,6 +131,36 @@ class MetadataAwareFakeBaseLM(BaseLM):
 
 
 class LambdaRLMInjectedClientTests(unittest.TestCase):
+    def test_prompt_registry_renders_strict_angle_placeholders_for_qa(self):
+        registry = LambdaPromptRegistry.from_bridge_bundle(
+            {"prompts": {"tasks/qa.md": {"template": "OVERRIDE <<query>> :: <<text>>"}}}
+        )
+
+        self.assertEqual(registry.render_qa(text="literal <<query>>", query="QUERY"), "OVERRIDE QUERY :: literal <<query>>")
+        with self.assertRaisesRegex(ValueError, "Unknown prompt placeholder"):
+            LambdaPromptRegistry.from_bridge_bundle(
+                {"prompts": {"tasks/qa.md": {"template": "OVERRIDE <<query>> <<text>> <<typo>>"}}}
+            )
+        with self.assertRaisesRegex(ValueError, "missing required placeholder"):
+            LambdaPromptRegistry.from_bridge_bundle(
+                {"prompts": {"tasks/qa.md": {"template": "OVERRIDE <<text>>"}}}
+            )
+
+    def test_qa_leaf_prompt_preserves_literal_placeholder_tokens_in_source_context(self):
+        fake = MetadataAwareFakeBaseLM()
+        registry = LambdaPromptRegistry.from_bridge_bundle(
+            {"prompts": {"tasks/qa.md": {"template": "Question: <<query>>\nSource:\n<<text>>"}}}
+        )
+        prompt = "Context:\nThe source literally says <<query>> here.\n\nQuestion: What token appears?\n\nAnswer:"
+
+        LambdaRLM(client=fake, context_window_chars=1000, prompt_registry=registry).completion(prompt)
+
+        leaf_prompts = [call["prompt"] for call in fake.calls if call["metadata"].get("combinator") == "leaf"]
+        self.assertEqual(len(leaf_prompts), 1)
+        self.assertIn("Question: What token appears?", leaf_prompts[0])
+        self.assertIn("Source:\nThe source literally says <<query>> here.", leaf_prompts[0])
+        self.assertNotIn("The source literally says What token appears? here.", leaf_prompts[0])
+
     def test_explicit_metadata_crosses_task_leaf_filter_and_reducer_without_prompt_text_inference(self):
         fake = MetadataAwareFakeBaseLM()
         context = " ".join([f"chunk {i} Ada Lovelace Analytical Engine metadata path." for i in range(20)])

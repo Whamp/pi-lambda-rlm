@@ -6,6 +6,7 @@ import { BridgeProtocolError, BridgeRunFailedError, runSyntheticBridge } from ".
 import { resolveRunConfig, type RunConfig } from "./configResolver.js";
 import { runFormalPiLeafModelCall, type LeafThinking, type ProcessRunner } from "./leafRunner.js";
 import { ModelCallConcurrencyQueue } from "./modelCallQueue.js";
+import { resolvePromptBundle } from "./promptResolver.js";
 import {
   DEFAULT_VISIBLE_OUTPUT_LIMIT,
   countLines,
@@ -199,6 +200,15 @@ function toSourceMetadata(input: LoadedSource): SourceMetadata {
   };
 }
 
+function promptMetadata(prompts: Record<string, { source: unknown; shadowedSources: unknown; bytes: number; sha256: string }>) {
+  return Object.fromEntries(
+    Object.entries(prompts).map(([key, prompt]) => [
+      key,
+      { source: prompt.source, shadowedSources: prompt.shadowedSources, bytes: prompt.bytes, sha256: prompt.sha256 },
+    ]),
+  );
+}
+
 function assembleSourceContext(sources: LoadedSource[]) {
   if (sources.length === 1) return sources[0]!.content;
   const manifest = ["Sources:", ...sources.map((source) => `[${source.sourceNumber}] ${source.path} (${source.bytes} bytes)`)].join("\n");
@@ -227,6 +237,10 @@ export async function executeLambdaRlmTool(
     homeDir?: string;
     globalConfigPath?: string;
     projectConfigPath?: string;
+    /** Test/runtime injection for prompt source paths; defaults remain ~/.pi/lambda-rlm/prompts and <cwd>/.pi/lambda-rlm/prompts. */
+    builtInPromptDir?: string;
+    globalPromptDir?: string;
+    projectPromptDir?: string;
     /** Optional directory for recoverable full output when truncation occurs. */
     fullOutputDir?: string;
     /** Extension-scoped queue injection for tests/host integration. */
@@ -267,6 +281,19 @@ export async function executeLambdaRlmTool(
   if (options.outputMaxVisibleChars !== undefined) {
     runConfig = { ...runConfig, outputMaxBytes: Math.min(runConfig.outputMaxBytes, options.outputMaxVisibleChars) };
   }
+
+  const promptResult = await resolvePromptBundle({
+    cwd,
+    ...(options.homeDir ? { homeDir: options.homeDir } : {}),
+    ...(options.builtInPromptDir ? { builtInPromptDir: options.builtInPromptDir } : {}),
+    ...(options.globalPromptDir ? { globalPromptDir: options.globalPromptDir } : {}),
+    ...(options.projectPromptDir ? { projectPromptDir: options.projectPromptDir } : {}),
+  });
+  if (!promptResult.ok) {
+    return formatValidationFailure(promptResult.error);
+  }
+  const promptBundle = promptResult.bundle;
+  const promptDetails = promptMetadata(promptBundle.prompts);
 
   const contextPaths = validated.contextPaths ?? [validated.contextPath!];
   const contextField = validated.contextPaths ? "contextPaths" : "contextPath";
@@ -315,6 +342,7 @@ export async function executeLambdaRlmTool(
             leafThinking,
             timeoutMs: options.leafTimeoutMs !== undefined ? Math.min(options.leafTimeoutMs, runConfig.modelCallTimeoutMs) : runConfig.modelCallTimeoutMs,
             ...(queuedCall.signal ? { signal: queuedCall.signal } : {}),
+            systemPrompt: promptBundle.formalLeafSystemPrompt,
             ...(options.leafProcessRunner ? { processRunner: options.leafProcessRunner } : {}),
           }),
         ),
@@ -322,6 +350,7 @@ export async function executeLambdaRlmTool(
       ...(options.contextWindowChars !== undefined ? { contextWindowChars: options.contextWindowChars } : {}),
       maxModelCalls: runConfig.maxModelCalls,
       wholeRunTimeoutMs: runConfig.wholeRunTimeoutMs,
+      promptBundle,
     });
   } catch (error) {
     if (error instanceof BridgeRunFailedError) {
@@ -355,6 +384,7 @@ export async function executeLambdaRlmTool(
           leafModel,
           leafThinking,
           runControls: runConfig,
+          prompts: promptDetails,
         },
         output: outputOptions,
       });
@@ -384,6 +414,7 @@ export async function executeLambdaRlmTool(
           leafModel,
           leafThinking,
           runControls: runConfig,
+          prompts: promptDetails,
         },
         output: outputOptions,
       });
@@ -432,6 +463,7 @@ export async function executeLambdaRlmTool(
       leafModel,
       leafThinking,
       runControls: runConfig,
+      prompts: promptDetails,
       ...(bridge.metadata ? { lambdaRlm: bridge.metadata } : {}),
     },
     output: outputOptions,

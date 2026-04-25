@@ -2,12 +2,14 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { LeafProcessFailure, type LeafModelCallFailureDetails, type LeafModelCallSuccess, type ModelCall } from "./leafRunner.js";
 import { ModelCallQueueCancelledError } from "./modelCallQueue.js";
+import type { ResolvedPromptBundle } from "./promptResolver.js";
 
 export type BridgeRunRequest = {
   type: "run_request";
   runId: string;
   input: { contextPath: string; question: string; context?: string };
   lambdaRlm?: { contextWindowChars?: number };
+  promptBundle?: ResolvedPromptBundle;
 };
 
 export type ModelCallbackRequest = {
@@ -118,6 +120,7 @@ export async function runSyntheticBridge(options: {
   contextWindowChars?: number;
   maxModelCalls?: number;
   wholeRunTimeoutMs?: number;
+  promptBundle?: ResolvedPromptBundle;
 }): Promise<CompletedSyntheticBridgeRun> {
   const pythonPath = options.pythonPath ?? "python3";
   const child = spawn(pythonPath, [options.bridgePath, ...(options.bridgeArgs ?? [])], {
@@ -429,6 +432,7 @@ export async function runSyntheticBridge(options: {
     runId: options.runId,
     input: { contextPath: options.contextPath, question: options.question, ...(options.context !== undefined ? { context: options.context } : {}) },
     ...(options.contextWindowChars !== undefined ? { lambdaRlm: { contextWindowChars: options.contextWindowChars } } : {}),
+    ...(options.promptBundle ? { promptBundle: options.promptBundle } : {}),
   };
   const requestWrite = writeBridgeMessage(request, "run request").catch((error: unknown) => failBridge(error));
   await Promise.race([requestWrite, done.then(() => undefined, () => undefined)]);

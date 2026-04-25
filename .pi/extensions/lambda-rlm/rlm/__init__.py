@@ -1,5 +1,5 @@
 from rlm.core.rlm import RLM
-from rlm.lambda_rlm import LambdaRLM, LambdaPlan, TaskType, ComposeOp
+from rlm.lambda_rlm import LambdaRLM, LambdaPlan, LambdaPromptRegistry, TaskType, ComposeOp
 from rlm.utils.exceptions import (
     BudgetExceededError,
     CancellationError,
@@ -12,6 +12,7 @@ __all__ = [
     "RLM",
     "LambdaRLM",
     "LambdaPlan",
+    "LambdaPromptRegistry",
     "TaskType",
     "ComposeOp",
     "BudgetExceededError",
