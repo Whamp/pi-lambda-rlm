@@ -53,30 +53,45 @@ export const LambdaRlmToolParameters = Type.Object(
 );
 
 type ToolUpdate = { content: Array<{ type: "text"; text: string }>; details?: Record<string, unknown> };
-type MinimalPiApi = { registerTool(tool: Record<string, unknown>): void; registerCommand?: (command: Record<string, unknown>) => void };
+type MinimalCommandContext = {
+  cwd?: string;
+  leafProcessRunner?: ProcessRunner;
+  ui?: { notify?: (message: string) => void | Promise<void> };
+};
+type MinimalPiApi = {
+  registerTool(tool: Record<string, unknown>): void;
+  registerCommand?: (name: string, options: { description: string; handler: (...args: unknown[]) => Promise<unknown> }) => void;
+};
 type MinimalExtensionContext = {
   cwd: string;
   leafProcessRunner?: ProcessRunner;
 };
 
+function commandContextFromArgs(args: unknown[]): MinimalCommandContext {
+  for (let index = args.length - 1; index >= 0; index -= 1) {
+    const arg = args[index];
+    if (typeof arg === "object" && arg !== null && ("cwd" in arg || "leafProcessRunner" in arg || "ui" in arg)) {
+      return arg as MinimalCommandContext;
+    }
+  }
+  return {};
+}
+
 export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
   const modelCallQueueState: { current?: ModelCallConcurrencyQueue } = {};
 
-  pi.registerCommand?.({
-    name: "/lambda-rlm-doctor",
+  pi.registerCommand?.("lambda-rlm-doctor", {
     description: "Runs non-mutating Lambda-RLM MVP setup diagnostics for Python, config, prompts, fork seams, Pi leaf command shape, and mock bridge readiness.",
-    async execute(_commandId: string, _params: unknown, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: MinimalExtensionContext) {
+    async handler(...args: unknown[]) {
+      const ctx = commandContextFromArgs(args);
       const report = await runLambdaRlmDoctor({
-        cwd: ctx.cwd,
+        cwd: ctx.cwd ?? process.cwd(),
         ...(ctx.leafProcessRunner ? { processRunner: ctx.leafProcessRunner } : {}),
       });
+      const summary = `lambda_rlm doctor ${report.ok ? "passed" : "found errors"}: ${report.checks.filter((entry) => entry.status === "error").length} error(s), ${report.checks.filter((entry) => entry.status === "warn").length} warning(s).`;
+      await ctx.ui?.notify?.(summary);
       return {
-        content: [
-          {
-            type: "text",
-            text: `lambda_rlm doctor ${report.ok ? "passed" : "found errors"}: ${report.checks.filter((entry) => entry.status === "error").length} error(s), ${report.checks.filter((entry) => entry.status === "warn").length} warning(s).`,
-          },
-        ],
+        content: [{ type: "text", text: summary }],
         details: report,
       };
     },
