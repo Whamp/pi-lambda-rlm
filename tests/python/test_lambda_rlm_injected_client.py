@@ -124,6 +124,17 @@ class LambdaRLMInjectedClientTests(unittest.TestCase):
         self.assertIn("client: BaseLM | None = None", Path(lambda_rlm_module.__file__).read_text())
         self.assertIn("self.client or get_client(self.backend, self.backend_kwargs)", Path(lambda_rlm_module.__file__).read_text())
 
+    def test_vendored_upstream_mit_license_notice_is_preserved(self):
+        rlm_dir = Path(lambda_rlm_module.__file__).resolve().parent
+        license_text = (rlm_dir / "LICENSE").read_text()
+        local_fork_text = (rlm_dir / "LOCAL_FORK.md").read_text()
+
+        self.assertIn("MIT License", license_text)
+        self.assertIn("Copyright (c) 2026 Lambda-RLM Contributors", license_text)
+        self.assertIn("Permission is hereby granted, free of charge", license_text)
+        self.assertIn("The above copyright notice and this permission notice", license_text)
+        self.assertIn("LICENSE", local_fork_text)
+
 
 if __name__ == "__main__":
     unittest.main()

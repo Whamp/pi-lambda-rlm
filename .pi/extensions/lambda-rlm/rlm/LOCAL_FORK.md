@@ -4,6 +4,10 @@ This directory vendors the upstream `rlm` package from
 `https://github.com/lambda-calculus-LLM/lambda-RLM` at commit
 `3874d393483dc4299101918cf8e9af670194bd88`.
 
+The vendored upstream package is MIT licensed. Keep the upstream license notice
+at `LICENSE` in this directory when updating, pruning, or replacing the vendored
+boundary.
+
 Intentional local patches for issue #5:
 
 1. `rlm.lambda_rlm.LambdaRLM.__init__(..., client: BaseLM | None = None)` stores
