@@ -385,6 +385,121 @@ sys.exit(0)
     await expect(readFile(fullOutputPath, "utf8")).resolves.toContain(longAnswer);
   });
 
+  it("enforces per-run max model calls in the real bridge path before starting an additional leaf process", async () => {
+    const contextPath = await tempContextFile("budgeted context");
+    const started: string[] = [];
+
+    const result = await executeLambdaRlmTool(
+      { contextPath, question: "What?", maxModelCalls: 1 },
+      {
+        leafProcessRunner: async (invocation) => {
+          const promptFile = invocation.args.at(-1);
+          const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
+          started.push(prompt);
+          return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : "unexpected\n", stderr: "" };
+        },
+      },
+    );
+
+    expect(started).toHaveLength(1);
+    expect(result.content[0]!.text).toContain("No authoritative answer is available");
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "runtime_failed",
+      authoritativeAnswerAvailable: false,
+      error: { type: "runtime", code: "max_model_calls_exceeded" },
+      partialRun: {
+        childPiLeafCalls: 1,
+        runControls: { maxModelCalls: 1 },
+        modelCallResponses: [
+          { ok: true, requestId: "model-call-1" },
+          { ok: false, requestId: "model-call-2", error: { code: "max_model_calls_exceeded" } },
+        ],
+      },
+    });
+  });
+
+  it("returns a structured runtime failure when whole-run timeout aborts the bridge", async () => {
+    const contextPath = await tempContextFile("timeout context");
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import sys, time
+sys.stdin.readline()
+sys.stderr.write("slow bridge started\\n")
+sys.stderr.flush()
+time.sleep(30)
+`);
+
+    const result = await executeLambdaRlmTool({ contextPath, question: "Timeout?", wholeRunTimeoutMs: 20 }, { bridgePath });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "runtime_failed",
+      authoritativeAnswerAvailable: false,
+      error: { type: "runtime", code: "whole_run_timeout" },
+      partialRun: { executionStarted: true, partialDetailsAvailable: true, stderrDiagnosticsChars: expect.any(Number), runControls: { wholeRunTimeoutMs: 20 } },
+    });
+  });
+
+  it("passes configured per-model-call timeout into the leaf runner and reports cleanup as a runtime failure", async () => {
+    const contextPath = await tempContextFile("per call timeout context");
+    let observedAbort = false;
+
+    const result = await executeLambdaRlmTool(
+      { contextPath, question: "Timeout leaf?", modelCallTimeoutMs: 10 },
+      {
+        leafProcessRunner: (invocation) =>
+          new Promise((resolve) => {
+            invocation.signal?.addEventListener("abort", () => {
+              observedAbort = true;
+              resolve({ exitCode: null, signal: "SIGTERM", stdout: "partial", stderr: "leaf timeout" });
+            });
+          }),
+      },
+    );
+
+    expect(observedAbort).toBe(true);
+    expect(result.details).toMatchObject({
+      ok: false,
+      authoritativeAnswerAvailable: false,
+      error: { code: "model_callback_failed" },
+      partialRun: {
+        runControls: { modelCallTimeoutMs: 10 },
+        modelCallResponses: [{ ok: false, error: { code: "per_model_call_timeout" }, diagnostics: { signal: "SIGTERM" } }],
+      },
+    });
+  });
+
+  it("returns structured cancellation failure and aborts the active leaf through the tool boundary", async () => {
+    const contextPath = await tempContextFile("cancel context");
+    const controller = new AbortController();
+    let observedAbort = false;
+    const promise = executeLambdaRlmTool(
+      { contextPath, question: "Cancel?" },
+      {
+        signal: controller.signal,
+        leafProcessRunner: (invocation) =>
+          new Promise((resolve) => {
+            invocation.signal?.addEventListener("abort", () => {
+              observedAbort = true;
+              resolve({ exitCode: null, signal: "SIGTERM", stdout: "", stderr: "cancelled" });
+            });
+            setTimeout(() => controller.abort(), 0);
+          }),
+      },
+    );
+
+    const result = await promise;
+
+    expect(observedAbort).toBe(true);
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "runtime_failed",
+      authoritativeAnswerAvailable: false,
+      error: { code: "run_cancelled" },
+      partialRun: { executionStarted: true, partialDetailsAvailable: true },
+    });
+  });
+
   it("rejects per-run loosening with a structured pre-execution validation failure", async () => {
     const contextPath = await tempContextFile("short source");
 

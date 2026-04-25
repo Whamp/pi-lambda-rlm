@@ -15,7 +15,16 @@ import {
   type TextContent,
 } from "./resultFormatter.js";
 
-const ALLOWED_KEYS = new Set(["contextPath", "question", "maxInputBytes", "outputMaxBytes", "outputMaxLines"]);
+const ALLOWED_KEYS = new Set([
+  "contextPath",
+  "question",
+  "maxInputBytes",
+  "outputMaxBytes",
+  "outputMaxLines",
+  "maxModelCalls",
+  "wholeRunTimeoutMs",
+  "modelCallTimeoutMs",
+]);
 
 export type LambdaRlmParams = {
   contextPath: string;
@@ -23,6 +32,9 @@ export type LambdaRlmParams = {
   maxInputBytes?: number;
   outputMaxBytes?: number;
   outputMaxLines?: number;
+  maxModelCalls?: number;
+  wholeRunTimeoutMs?: number;
+  modelCallTimeoutMs?: number;
 };
 
 export type LambdaRlmToolResult = {
@@ -81,8 +93,8 @@ export function validateLambdaRlmParams(value: unknown): LambdaRlmParams {
     throw new LambdaRlmValidationError("missing_question", "question is required and must be a non-empty string.", "question");
   }
 
-  const perRun: Partial<Pick<LambdaRlmParams, "maxInputBytes" | "outputMaxBytes" | "outputMaxLines">> = {};
-  for (const field of ["maxInputBytes", "outputMaxBytes", "outputMaxLines"] as const) {
+  const perRun: Partial<Pick<LambdaRlmParams, "maxInputBytes" | "outputMaxBytes" | "outputMaxLines" | "maxModelCalls" | "wholeRunTimeoutMs" | "modelCallTimeoutMs">> = {};
+  for (const field of ["maxInputBytes", "outputMaxBytes", "outputMaxLines", "maxModelCalls", "wholeRunTimeoutMs", "modelCallTimeoutMs"] as const) {
     if (value[field] !== undefined) {
       if (!Number.isSafeInteger(value[field]) || (value[field] as number) <= 0) {
         throw new LambdaRlmValidationError("invalid_config_value", `${field} must be a positive safe integer.`, field);
@@ -182,6 +194,9 @@ export async function executeLambdaRlmTool(
       ...(validated.maxInputBytes !== undefined ? { maxInputBytes: validated.maxInputBytes } : {}),
       ...(validated.outputMaxBytes !== undefined ? { outputMaxBytes: validated.outputMaxBytes } : {}),
       ...(validated.outputMaxLines !== undefined ? { outputMaxLines: validated.outputMaxLines } : {}),
+      ...(validated.maxModelCalls !== undefined ? { maxModelCalls: validated.maxModelCalls } : {}),
+      ...(validated.wholeRunTimeoutMs !== undefined ? { wholeRunTimeoutMs: validated.wholeRunTimeoutMs } : {}),
+      ...(validated.modelCallTimeoutMs !== undefined ? { modelCallTimeoutMs: validated.modelCallTimeoutMs } : {}),
     },
   });
   if (!configResult.ok) {
@@ -226,12 +241,14 @@ export async function executeLambdaRlmTool(
           ...(options.piExecutable ? { piExecutable: options.piExecutable } : {}),
           leafModel,
           leafThinking,
-          ...(options.leafTimeoutMs !== undefined ? { timeoutMs: options.leafTimeoutMs } : {}),
+          timeoutMs: options.leafTimeoutMs !== undefined ? Math.min(options.leafTimeoutMs, runConfig.modelCallTimeoutMs) : runConfig.modelCallTimeoutMs,
+          ...(call.signal ? { signal: call.signal } : {}),
           ...(options.leafProcessRunner ? { processRunner: options.leafProcessRunner } : {}),
-          ...(options.signal ? { signal: options.signal } : {}),
         }),
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.contextWindowChars !== undefined ? { contextWindowChars: options.contextWindowChars } : {}),
+      maxModelCalls: runConfig.maxModelCalls,
+      wholeRunTimeoutMs: runConfig.wholeRunTimeoutMs,
     });
   } catch (error) {
     if (error instanceof BridgeRunFailedError) {
@@ -257,7 +274,8 @@ export async function executeLambdaRlmTool(
           failedRunResult: error.details.failedRunResult,
           finalResults: 1,
           realLambdaRlm: true,
-          childPiLeafCalls: error.details.modelCallResponses.length,
+          childPiLeafCalls:
+            typeof error.details.failedRunResult.modelCalls === "number" ? error.details.failedRunResult.modelCalls : error.details.modelCallResponses.length,
           leafProfile: "formal_pi_print",
           leafModel,
           leafThinking,

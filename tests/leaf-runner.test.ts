@@ -94,4 +94,33 @@ describe("Formal Pi leaf runner", () => {
       },
     } satisfies Partial<LeafProcessFailure>);
   });
+
+  it("aborts a stuck child process on per-model-call timeout and reports a structured timeout failure", async () => {
+    let observedAbort = false;
+    await expect(
+      runFormalPiLeafModelCall(
+        { requestId: "model-call-timeout", prompt: "prompt" },
+        {
+          leafModel: "google/gemini-test",
+          timeoutMs: 10,
+          processRunner: (invocation) =>
+            new Promise((resolve) => {
+              invocation.signal?.addEventListener("abort", () => {
+                observedAbort = true;
+                resolve({ exitCode: null, signal: "SIGTERM", stdout: "partial stdout", stderr: "timed out" });
+              });
+            }),
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: "LeafProcessFailure",
+      details: {
+        ok: false,
+        requestId: "model-call-timeout",
+        error: { type: "child_process", code: "per_model_call_timeout" },
+        diagnostics: { stdout: "partial stdout", stderr: "timed out", exitCode: null, signal: "SIGTERM" },
+      },
+    });
+    expect(observedAbort).toBe(true);
+  });
 });
