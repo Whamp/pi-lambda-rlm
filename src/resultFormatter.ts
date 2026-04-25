@@ -14,7 +14,10 @@ export type SourceMetadata = {
 };
 
 export type OutputLimitOptions = {
+  /** Deprecated compatibility knob from earlier slices; treated as a byte limit for ASCII output. */
   maxVisibleChars?: number;
+  maxVisibleBytes?: number;
+  maxVisibleLines?: number;
   fullOutputDir?: string;
   runId?: string;
 };
@@ -30,22 +33,58 @@ export function countLines(text: string): number {
   return text.split("\n").length;
 }
 
+function utf8ByteLength(text: string) {
+  return Buffer.byteLength(text, "utf8");
+}
+
+function truncateToBytes(text: string, maxBytes: number) {
+  let out = "";
+  for (const char of text) {
+    const next = out + char;
+    if (utf8ByteLength(next) > maxBytes) break;
+    out = next;
+  }
+  return out;
+}
+
+function withinVisibleLimits(text: string, maxVisibleBytes: number, maxVisibleLines?: number) {
+  return utf8ByteLength(text) <= maxVisibleBytes && (maxVisibleLines === undefined || countLines(text) <= maxVisibleLines);
+}
+
 async function boundVisibleOutput(text: string, options: OutputLimitOptions = {}) {
-  const maxVisibleChars = options.maxVisibleChars ?? DEFAULT_VISIBLE_OUTPUT_LIMIT;
-  if (text.length <= maxVisibleChars) {
-    return { text, truncated: false, maxVisibleChars, visibleChars: text.length };
+  const maxVisibleBytes = options.maxVisibleBytes ?? options.maxVisibleChars ?? DEFAULT_VISIBLE_OUTPUT_LIMIT;
+  const maxVisibleLines = options.maxVisibleLines;
+  const compatibilityMaxVisibleChars = options.maxVisibleChars ?? maxVisibleBytes;
+  if (withinVisibleLimits(text, maxVisibleBytes, maxVisibleLines)) {
+    return { text, truncated: false, maxVisibleChars: compatibilityMaxVisibleChars, maxVisibleBytes, maxVisibleLines, visibleChars: text.length, visibleBytes: utf8ByteLength(text) };
   }
 
-  const suffix = "\n[Lambda-RLM output truncated; full output path is in details.output.fullOutputPath when configured.]";
-  const sliceAt = Math.max(0, maxVisibleChars - suffix.length);
+  const suffix = "[Lambda-RLM output truncated; full output path is in details.output.fullOutputPath when configured.]";
   let fullOutputPath: string | undefined;
   if (options.fullOutputDir) {
     await mkdir(options.fullOutputDir, { recursive: true });
     fullOutputPath = join(options.fullOutputDir, `${options.runId ?? "lambda-rlm-output"}.txt`);
     await writeFile(fullOutputPath, text, "utf8");
   }
-  const boundedText = text.slice(0, sliceAt) + suffix.slice(0, maxVisibleChars - sliceAt);
-  return { text: boundedText, truncated: true, maxVisibleChars, visibleChars: boundedText.length, ...(fullOutputPath ? { fullOutputPath } : {}) };
+
+  const allowedContentLines = maxVisibleLines === undefined ? undefined : Math.max(0, maxVisibleLines - 1);
+  const lineLimitedText = allowedContentLines === undefined ? text : text.split("\n").slice(0, allowedContentLines).join("\n");
+  const separator = allowedContentLines === 0 ? "" : "\n";
+  const suffixWithSeparator = `${separator}${suffix}`;
+  const suffixBytes = utf8ByteLength(suffixWithSeparator);
+  const contentBudget = Math.max(0, maxVisibleBytes - suffixBytes);
+  const boundedContent = truncateToBytes(lineLimitedText, contentBudget);
+  const boundedText = truncateToBytes(`${boundedContent}${suffixWithSeparator}`, maxVisibleBytes);
+  return {
+    text: boundedText,
+    truncated: true,
+    maxVisibleChars: compatibilityMaxVisibleChars,
+    maxVisibleBytes,
+    maxVisibleLines,
+    visibleChars: boundedText.length,
+    visibleBytes: utf8ByteLength(boundedText),
+    ...(fullOutputPath ? { fullOutputPath } : {}),
+  };
 }
 
 function sourceDetails(source: SourceMetadata) {
@@ -88,8 +127,11 @@ export async function formatSuccessResult(args: {
       output: {
         bounded: true,
         visibleChars: bounded.visibleChars,
+        visibleBytes: bounded.visibleBytes,
         truncated: bounded.truncated,
         maxVisibleChars: bounded.maxVisibleChars,
+        maxVisibleBytes: bounded.maxVisibleBytes,
+        ...(bounded.maxVisibleLines !== undefined ? { maxVisibleLines: bounded.maxVisibleLines } : {}),
         ...(bounded.fullOutputPath ? { fullOutputPath: bounded.fullOutputPath } : {}),
       },
       warnings: [],
@@ -139,8 +181,11 @@ export async function formatRuntimeFailure(args: {
       output: {
         bounded: true,
         visibleChars: bounded.visibleChars,
+        visibleBytes: bounded.visibleBytes,
         truncated: bounded.truncated,
         maxVisibleChars: bounded.maxVisibleChars,
+        maxVisibleBytes: bounded.maxVisibleBytes,
+        ...(bounded.maxVisibleLines !== undefined ? { maxVisibleLines: bounded.maxVisibleLines } : {}),
         ...(bounded.fullOutputPath ? { fullOutputPath: bounded.fullOutputPath } : {}),
       },
     },

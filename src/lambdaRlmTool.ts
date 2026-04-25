@@ -2,6 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BridgeProtocolError, BridgeRunFailedError, runSyntheticBridge } from "./bridgeRunner.js";
+import { resolveRunConfig, type RunConfig } from "./configResolver.js";
 import { runFormalPiLeafModelCall, type LeafThinking, type ProcessRunner } from "./leafRunner.js";
 import {
   DEFAULT_VISIBLE_OUTPUT_LIMIT,
@@ -14,11 +15,14 @@ import {
   type TextContent,
 } from "./resultFormatter.js";
 
-const ALLOWED_KEYS = new Set(["contextPath", "question"]);
+const ALLOWED_KEYS = new Set(["contextPath", "question", "maxInputBytes", "outputMaxBytes", "outputMaxLines"]);
 
 export type LambdaRlmParams = {
   contextPath: string;
   question: string;
+  maxInputBytes?: number;
+  outputMaxBytes?: number;
+  outputMaxLines?: number;
 };
 
 export type LambdaRlmToolResult = {
@@ -77,10 +81,28 @@ export function validateLambdaRlmParams(value: unknown): LambdaRlmParams {
     throw new LambdaRlmValidationError("missing_question", "question is required and must be a non-empty string.", "question");
   }
 
-  return { contextPath, question };
+  const perRun: Partial<Pick<LambdaRlmParams, "maxInputBytes" | "outputMaxBytes" | "outputMaxLines">> = {};
+  for (const field of ["maxInputBytes", "outputMaxBytes", "outputMaxLines"] as const) {
+    if (value[field] !== undefined) {
+      if (!Number.isSafeInteger(value[field]) || (value[field] as number) <= 0) {
+        throw new LambdaRlmValidationError("invalid_config_value", `${field} must be a positive safe integer.`, field);
+      }
+      perRun[field] = value[field] as number;
+    }
+  }
+
+  return { contextPath, question, ...perRun };
 }
 
-async function loadContextFile(contextPath: string, cwd: string) {
+function maxInputBytesError(bytes: number, maxInputBytes: number) {
+  return new LambdaRlmValidationError(
+    "max_input_bytes_exceeded",
+    `contextPath is ${bytes} bytes, exceeding the resolved max_input_bytes limit of ${maxInputBytes}.`,
+    "contextPath",
+  );
+}
+
+async function loadContextFile(contextPath: string, cwd: string, maxInputBytes: number) {
   const normalizedPath = contextPath.startsWith("@") ? contextPath.slice(1) : contextPath;
   const resolvedPath = resolve(cwd, normalizedPath);
 
@@ -89,9 +111,16 @@ async function loadContextFile(contextPath: string, cwd: string) {
     if (!fileStat.isFile()) {
       throw new LambdaRlmValidationError("unreadable_context_path", `contextPath is not a readable file: ${contextPath}`, "contextPath");
     }
+    if (fileStat.size > maxInputBytes) {
+      throw maxInputBytesError(fileStat.size, maxInputBytes);
+    }
 
     const content = await readFile(resolvedPath, "utf8");
-    return { resolvedPath, content, bytes: fileStat.size };
+    const bytes = Buffer.byteLength(content, "utf8");
+    if (bytes > maxInputBytes) {
+      throw maxInputBytesError(bytes, maxInputBytes);
+    }
+    return { resolvedPath, content, bytes };
   } catch (error) {
     if (error instanceof LambdaRlmValidationError) throw error;
     const code = (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing_context_path_file" : "unreadable_context_path";
@@ -123,8 +152,12 @@ export async function executeLambdaRlmTool(
     leafTimeoutMs?: number;
     /** Internal/test run-control knob; not part of the public lambda_rlm params schema. */
     contextWindowChars?: number;
-    /** Internal/default output bound; TOML configurability is intentionally deferred. */
+    /** Internal/default output bound retained for older tests/callers; TOML outputMaxBytes is preferred. */
     outputMaxVisibleChars?: number;
+    /** Test/runtime injection for config source paths; defaults remain ~/.pi/lambda-rlm and <cwd>/.pi/lambda-rlm. */
+    homeDir?: string;
+    globalConfigPath?: string;
+    projectConfigPath?: string;
     /** Optional directory for recoverable full output when truncation occurs. */
     fullOutputDir?: string;
   } = {},
@@ -140,9 +173,28 @@ export async function executeLambdaRlmTool(
   }
 
   const cwd = options.cwd ?? process.cwd();
+  const configResult = await resolveRunConfig({
+    cwd,
+    ...(options.homeDir ? { homeDir: options.homeDir } : {}),
+    ...(options.globalConfigPath ? { globalConfigPath: options.globalConfigPath } : {}),
+    ...(options.projectConfigPath ? { projectConfigPath: options.projectConfigPath } : {}),
+    perRun: {
+      ...(validated.maxInputBytes !== undefined ? { maxInputBytes: validated.maxInputBytes } : {}),
+      ...(validated.outputMaxBytes !== undefined ? { outputMaxBytes: validated.outputMaxBytes } : {}),
+      ...(validated.outputMaxLines !== undefined ? { outputMaxLines: validated.outputMaxLines } : {}),
+    },
+  });
+  if (!configResult.ok) {
+    return formatValidationFailure(configResult.error);
+  }
+  let runConfig: RunConfig = configResult.config;
+  if (options.outputMaxVisibleChars !== undefined) {
+    runConfig = { ...runConfig, outputMaxBytes: Math.min(runConfig.outputMaxBytes, options.outputMaxVisibleChars) };
+  }
+
   let loaded: Awaited<ReturnType<typeof loadContextFile>>;
   try {
-    loaded = await loadContextFile(validated.contextPath, cwd);
+    loaded = await loadContextFile(validated.contextPath, cwd, runConfig.maxInputBytes);
   } catch (error) {
     if (error instanceof LambdaRlmValidationError) {
       return formatValidationFailure(error.details.error);
@@ -156,6 +208,8 @@ export async function executeLambdaRlmTool(
   const leafThinking = options.leafThinking ?? "off";
   const outputOptions = {
     maxVisibleChars: options.outputMaxVisibleChars ?? DEFAULT_VISIBLE_OUTPUT_LIMIT,
+    maxVisibleBytes: runConfig.outputMaxBytes,
+    maxVisibleLines: runConfig.outputMaxLines,
     ...(options.fullOutputDir ? { fullOutputDir: options.fullOutputDir } : {}),
     runId,
   };
@@ -207,6 +261,7 @@ export async function executeLambdaRlmTool(
           leafProfile: "formal_pi_print",
           leafModel,
           leafThinking,
+          runControls: runConfig,
         },
         output: outputOptions,
       });
@@ -235,6 +290,7 @@ export async function executeLambdaRlmTool(
           leafProfile: "formal_pi_print",
           leafModel,
           leafThinking,
+          runControls: runConfig,
         },
         output: outputOptions,
       });
@@ -277,6 +333,7 @@ export async function executeLambdaRlmTool(
       leafProfile: "formal_pi_print",
       leafModel,
       leafThinking,
+      runControls: runConfig,
       ...(bridge.metadata ? { lambdaRlm: bridge.metadata } : {}),
     },
     output: outputOptions,

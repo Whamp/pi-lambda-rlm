@@ -280,6 +280,124 @@ sys.exit(0)
     });
   });
 
+  it("enforces resolved max input bytes from TOML config before starting the real bridge path", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "lambda-rlm-project-config-"));
+    const configPath = join(cwd, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(join(cwd, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(configPath, "[run]\nmax_input_bytes = 9\n", "utf8");
+    const contextPath = join(cwd, "context.txt");
+    await writeFile(contextPath, "1234567890", "utf8");
+    let bridgeStarted = false;
+
+    const result = await executeLambdaRlmTool(
+      { contextPath: "context.txt", question: "Too large?" },
+      {
+        cwd,
+        leafProcessRunner: async () => {
+          bridgeStarted = true;
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      },
+    );
+
+    expect(bridgeStarted).toBe(false);
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "validation_failed",
+      error: { type: "validation", code: "max_input_bytes_exceeded", field: "contextPath" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
+    });
+  });
+
+  it("enforces resolved max input bytes before starting the real bridge path", async () => {
+    const contextPath = await tempContextFile("1234567890");
+    let bridgeStarted = false;
+
+    const result = await executeLambdaRlmTool(
+      { contextPath, question: "Too large?", maxInputBytes: 9 },
+      {
+        leafProcessRunner: async () => {
+          bridgeStarted = true;
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      },
+    );
+
+    expect(bridgeStarted).toBe(false);
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "validation_failed",
+      error: { type: "validation", code: "max_input_bytes_exceeded", field: "contextPath" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
+    });
+  });
+
+  it("rejects an oversized contextPath from stat before reading unreadable contents or invoking the bridge", async () => {
+    const contextPath = await tempContextFile("1234567890");
+    await chmod(contextPath, 0o000);
+    let bridgeStarted = false;
+
+    try {
+      const result = await executeLambdaRlmTool(
+        { contextPath, question: "Too large?", maxInputBytes: 9 },
+        {
+          leafProcessRunner: async () => {
+            bridgeStarted = true;
+            return { exitCode: 0, stdout: "", stderr: "" };
+          },
+        },
+      );
+
+      expect(bridgeStarted).toBe(false);
+      expect(result.details).toMatchObject({
+        ok: false,
+        runStatus: "validation_failed",
+        error: { type: "validation", code: "max_input_bytes_exceeded", field: "contextPath" },
+        execution: { executionStarted: false, partialDetailsAvailable: false },
+      });
+    } finally {
+      await chmod(contextPath, 0o600);
+    }
+  });
+
+  it("uses per-run output byte and line tightening in the real bridge path", async () => {
+    const contextPath = await tempContextFile("short source");
+    const fullOutputDir = await mkdtemp(join(tmpdir(), "lambda-rlm-full-output-"));
+    const longAnswer = ["ANSWER", "line two", "line three", "line four"].join("\n");
+
+    const result = await executeLambdaRlmTool(
+      { contextPath, question: "Produce long output", outputMaxBytes: 140, outputMaxLines: 3 },
+      {
+        fullOutputDir,
+        leafProcessRunner: async (invocation) => {
+          const promptFile = invocation.args.at(-1);
+          const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
+          return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : `${longAnswer}\n`, stderr: "" };
+        },
+      },
+    );
+
+    expect(result.content[0]!.text).toContain("truncated");
+    expect(result.content[0]!.text.split("\n").length).toBeLessThanOrEqual(3);
+    expect(Buffer.byteLength(result.content[0]!.text, "utf8")).toBeLessThanOrEqual(140);
+    expect(result.details).toMatchObject({ ok: true, output: { truncated: true, maxVisibleBytes: 140, maxVisibleLines: 3 } });
+    const fullOutputPath = (result.details.output as any).fullOutputPath;
+    await expect(readFile(fullOutputPath, "utf8")).resolves.toContain(longAnswer);
+  });
+
+  it("rejects per-run loosening with a structured pre-execution validation failure", async () => {
+    const contextPath = await tempContextFile("short source");
+
+    const result = await executeLambdaRlmTool({ contextPath, question: "Loosen?", maxInputBytes: 999999999 });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "validation_failed",
+      error: { type: "validation", code: "per_run_limit_loosened", field: "maxInputBytes" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
+    });
+  });
+
   it("truncates long visible output deterministically, preserves the compact run summary, and writes recoverable full output when configured", async () => {
     const contextPath = await tempContextFile("short source");
     const fullOutputDir = await mkdtemp(join(tmpdir(), "lambda-rlm-full-output-"));
