@@ -1,0 +1,16 @@
+{
+  "name": "pi-lambda-rlm",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.13",
+    "typebox": "^1.0.55"
+  }
+}
