@@ -20,12 +20,24 @@ describe("lambda_rlm Pi extension registration", () => {
       properties: {
         contextPath: { type: "string" },
         question: { type: "string" },
-        maxInputBytes: { type: "number" },
-        outputMaxBytes: { type: "number" },
-        outputMaxLines: { type: "number" },
+        maxInputBytes: { type: "number", minimum: 1 },
+        outputMaxBytes: { type: "number", minimum: 1 },
+        outputMaxLines: { type: "number", minimum: 1 },
+        maxModelCalls: { type: "number", minimum: 1 },
+        wholeRunTimeoutMs: { type: "number", minimum: 1 },
+        modelCallTimeoutMs: { type: "number", minimum: 1 },
       },
     });
-    expect(Object.keys(tool.parameters.properties).sort()).toEqual(["contextPath", "maxInputBytes", "outputMaxBytes", "outputMaxLines", "question"]);
+    expect(Object.keys(tool.parameters.properties).sort()).toEqual([
+      "contextPath",
+      "maxInputBytes",
+      "maxModelCalls",
+      "modelCallTimeoutMs",
+      "outputMaxBytes",
+      "outputMaxLines",
+      "question",
+      "wholeRunTimeoutMs",
+    ]);
   });
 
   it("describes the public tool as the real path-based Lambda-RLM integration", async () => {
@@ -50,6 +62,8 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(publicMetadataText).toMatch(/real Lambda-RLM/i);
     expect(publicMetadataText).toMatch(/Formal Leaf/i);
     expect(publicMetadataText).toMatch(/path-based|contextPath/i);
+    expect(publicMetadataText).toMatch(/maxModelCalls|wholeRunTimeoutMs|modelCallTimeoutMs/i);
+    expect(publicMetadataText).toMatch(/per-run tightening/i);
   });
 
   it("executes through the registered public tool path", async () => {
@@ -68,6 +82,37 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(result.content[0].text).toContain("synthetic model answer");
     expect(result.details.ok).toBe(true);
     expect(JSON.stringify(result.details)).not.toContain("Path-Based Context Ingestion");
+  });
+
+  it("passes public per-run model-call budget controls through the registered execute path", async () => {
+    const tool = registeredLambdaRlmTool();
+    const started: string[] = [];
+
+    const result = await tool.execute(
+      "call-budgeted",
+      { contextPath: "CONTEXT.md", question: "What is this project about?", maxModelCalls: 1 },
+      undefined,
+      undefined,
+      {
+        cwd: process.cwd(),
+        leafProcessRunner: async (invocation: any) => {
+          const promptFile = invocation.args.at(-1);
+          const prompt = promptFile?.startsWith("@") ? await import("node:fs/promises").then((fs) => fs.readFile(promptFile.slice(1), "utf8")) : "";
+          started.push(prompt);
+          return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : "unexpected\n", stderr: "" };
+        },
+      },
+    );
+
+    expect(started).toHaveLength(1);
+    expect(result.content[0].text).toContain("No authoritative answer is available");
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "runtime_failed",
+      authoritativeAnswerAvailable: false,
+      error: { type: "runtime", code: "max_model_calls_exceeded" },
+      partialRun: { childPiLeafCalls: 1, runControls: { maxModelCalls: 1 } },
+    });
   });
 
   it("returns structured validation details from the registered execute path for a missing context file", async () => {
@@ -99,6 +144,15 @@ describe("lambda_rlm Pi extension registration", () => {
 
     expect(tool).toBeTruthy();
     expect(tool.name).toBe("lambda_rlm");
-    expect(Object.keys(tool.parameters.properties).sort()).toEqual(["contextPath", "maxInputBytes", "outputMaxBytes", "outputMaxLines", "question"]);
+    expect(Object.keys(tool.parameters.properties).sort()).toEqual([
+      "contextPath",
+      "maxInputBytes",
+      "maxModelCalls",
+      "modelCallTimeoutMs",
+      "outputMaxBytes",
+      "outputMaxLines",
+      "question",
+      "wholeRunTimeoutMs",
+    ]);
   });
 });
