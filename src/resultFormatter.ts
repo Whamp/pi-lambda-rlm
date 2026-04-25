@@ -5,6 +5,7 @@ import { join } from "node:path";
 export type TextContent = { type: "text"; text: string };
 
 export type SourceMetadata = {
+  sourceNumber: number;
   path: string;
   resolvedPath: string;
   bytes: number;
@@ -87,28 +88,60 @@ async function boundVisibleOutput(text: string, options: OutputLimitOptions = {}
   };
 }
 
-function sourceDetails(source: SourceMetadata) {
+function compactSourceDetails(source: SourceMetadata) {
   return {
-    source: "file",
-    contextPath: source.path,
-    resolvedContextPath: source.resolvedPath,
-    contextChars: source.chars,
-    contextBytes: source.bytes,
-    contextLines: source.lines,
+    sourceNumber: source.sourceNumber,
+    path: source.path,
+    resolvedPath: source.resolvedPath,
+    bytes: source.bytes,
+    chars: source.chars,
+    lines: source.lines,
     sha256: source.sha256,
+  };
+}
+
+function sourceDetails(sources: SourceMetadata[]) {
+  if (sources.length === 1) {
+    const source = sources[0]!;
+    return {
+      source: "file",
+      contextPath: source.path,
+      resolvedContextPath: source.resolvedPath,
+      contextChars: source.chars,
+      contextBytes: source.bytes,
+      contextLines: source.lines,
+      sourceNumber: source.sourceNumber,
+      sources: [compactSourceDetails(source)],
+      sourceCount: 1,
+      totalBytes: source.bytes,
+      totalChars: source.chars,
+      totalLines: source.lines,
+      sha256: source.sha256,
+    };
+  }
+  return {
+    source: "files",
+    sourceCount: sources.length,
+    totalBytes: sources.reduce((sum, source) => sum + source.bytes, 0),
+    totalChars: sources.reduce((sum, source) => sum + source.chars, 0),
+    totalLines: sources.reduce((sum, source) => sum + source.lines, 0),
+    sources: sources.map(compactSourceDetails),
   };
 }
 
 export async function formatSuccessResult(args: {
   answer: string;
-  source: SourceMetadata;
+  sources: SourceMetadata[];
   question: string;
   bridgeRun: Record<string, unknown>;
   modelCallSummary: Record<string, unknown>;
   output?: OutputLimitOptions;
 }) {
+  const totalChars = args.sources.reduce((sum, source) => sum + source.chars, 0);
+  const totalLines = args.sources.reduce((sum, source) => sum + source.lines, 0);
+  const sourceSummary = args.sources.length === 1 ? `source chars=${totalChars}, lines=${totalLines}` : `sources=${args.sources.length}, chars=${totalChars}, lines=${totalLines}`;
   const rawVisible = [
-    `Run summary: Real Lambda-RLM completed; source chars=${args.source.chars}, lines=${args.source.lines}.`,
+    `Run summary: Real Lambda-RLM completed; ${sourceSummary}.`,
     `Model calls: ${String(args.modelCallSummary.total ?? 0)}.`,
     "",
     args.answer,
@@ -121,7 +154,7 @@ export async function formatSuccessResult(args: {
       authoritativeAnswerAvailable: true,
       answerChars: args.answer.length,
       runStatus: "succeeded",
-      input: { ...sourceDetails(args.source), questionChars: args.question.length },
+      input: { ...sourceDetails(args.sources), questionChars: args.question.length },
       modelCalls: args.modelCallSummary,
       bridgeRun: args.bridgeRun,
       output: {
@@ -153,7 +186,7 @@ export function formatValidationFailure(args: { code: string; message: string; f
 
 export async function formatRuntimeFailure(args: {
   error: { type: string; code: string; message: string };
-  source?: SourceMetadata;
+  sources?: SourceMetadata[];
   question?: string;
   partialBridgeRun?: Record<string, unknown>;
   partialAnswer?: string;
@@ -176,7 +209,7 @@ export async function formatRuntimeFailure(args: {
       authoritativeAnswerAvailable: false,
       error: args.error,
       ...(args.partialAnswer ? { partialAnswer: { authoritative: false, text: args.partialAnswer } } : {}),
-      ...(args.source ? { input: { ...sourceDetails(args.source), ...(args.question ? { questionChars: args.question.length } : {}) } } : {}),
+      ...(args.sources ? { input: { ...sourceDetails(args.sources), ...(args.question ? { questionChars: args.question.length } : {}) } } : {}),
       ...(args.partialBridgeRun ? { partialRun: args.partialBridgeRun } : {}),
       output: {
         bounded: true,

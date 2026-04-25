@@ -16,9 +16,10 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(tool.parameters).toMatchObject({
       type: "object",
       additionalProperties: false,
-      required: ["contextPath", "question"],
+      required: ["question"],
       properties: {
         contextPath: { type: "string" },
+        contextPaths: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
         question: { type: "string" },
         maxInputBytes: { type: "number", minimum: 1 },
         outputMaxBytes: { type: "number", minimum: 1 },
@@ -28,8 +29,10 @@ describe("lambda_rlm Pi extension registration", () => {
         modelCallTimeoutMs: { type: "number", minimum: 1 },
       },
     });
+    expect(JSON.stringify(tool.parameters)).toContain("exactly one of contextPath or contextPaths");
     expect(Object.keys(tool.parameters.properties).sort()).toEqual([
       "contextPath",
+      "contextPaths",
       "maxInputBytes",
       "maxModelCalls",
       "modelCallTimeoutMs",
@@ -146,6 +149,7 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(tool.name).toBe("lambda_rlm");
     expect(Object.keys(tool.parameters.properties).sort()).toEqual([
       "contextPath",
+      "contextPaths",
       "maxInputBytes",
       "maxModelCalls",
       "modelCallTimeoutMs",

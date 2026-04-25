@@ -234,7 +234,7 @@ print(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"conten
     [{ contextPath: "file.txt", question: "What?", context: "inline text" }, "unsupported_input"],
     [{ contextPath: "file.txt", question: "What?", prompt: "raw prompt" }, "unsupported_input"],
     [{ contextPath: "file.txt", question: "What?", rawPrompt: "raw prompt" }, "unsupported_input"],
-    [{ contextPath: "file.txt", question: "What?", contextPaths: ["a", "b"] }, "unsupported_input"],
+    [{ contextPath: "file.txt", question: "What?", contextPaths: ["a", "b"] }, "mixed_context_path_fields"],
     [{ contextPath: "file.txt", question: "What?", path: "other.txt" }, "unsupported_input"],
     [{ contextPath: "file.txt", question: "What?", extra: true }, "unknown_keys"],
   ])("returns a pre-execution validation failure result for invalid public input shape %#", async (params, code) => {
@@ -533,6 +533,126 @@ time.sleep(30)
         modelCallResponses: [{ ok: false, error: { code: "per_model_call_timeout" }, diagnostics: { signal: "SIGTERM" } }],
       },
     });
+  });
+
+  it("accepts contextPaths, assembles ordered source manifest and source-delimited context for one consolidated bridge run without returning source contents", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-multi-"));
+    const firstPath = join(dir, "b.txt");
+    const secondPath = join(dir, "a.txt");
+    await writeFile(firstPath, "FIRST_SECRET_CONTENT\nfirst fact", "utf8");
+    await writeFile(secondPath, "SECOND_SECRET_CONTENT\nsecond fact", "utf8");
+    const prompts: string[] = [];
+
+    const result = await executeLambdaRlmTool(
+      { contextPaths: [firstPath, secondPath], question: "What facts are present?" },
+      {
+        contextWindowChars: 1000,
+        leafProcessRunner: async (invocation) => {
+          const promptFile = invocation.args.at(-1);
+          const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
+          prompts.push(prompt);
+          return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : "Both facts are present.\n", stderr: "" };
+        },
+      },
+    );
+
+    expect(result.details).toMatchObject({
+      ok: true,
+      input: {
+        source: "files",
+        sourceCount: 2,
+        totalBytes: Buffer.byteLength("FIRST_SECRET_CONTENT\nfirst factSECOND_SECRET_CONTENT\nsecond fact", "utf8"),
+        sources: [
+          { sourceNumber: 1, path: firstPath, bytes: Buffer.byteLength("FIRST_SECRET_CONTENT\nfirst fact", "utf8"), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+          { sourceNumber: 2, path: secondPath, bytes: Buffer.byteLength("SECOND_SECRET_CONTENT\nsecond fact", "utf8"), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+        ],
+      },
+      bridgeRun: { childPiLeafCalls: prompts.length },
+    });
+    const leafPrompt = prompts.find((prompt) => prompt.includes("Using the following context, answer"));
+    expect(leafPrompt).toContain(`Sources:\n[1] ${firstPath} (`);
+    expect(leafPrompt).toContain(`[2] ${secondPath} (`);
+    expect(leafPrompt).toContain(`--- BEGIN SOURCE 1: ${firstPath} ---`);
+    expect(leafPrompt).toContain("FIRST_SECRET_CONTENT");
+    expect(leafPrompt).toContain(`--- BEGIN SOURCE 2: ${secondPath} ---`);
+    expect(leafPrompt).toContain("SECOND_SECRET_CONTENT");
+    expect(JSON.stringify(result.details)).not.toContain("FIRST_SECRET_CONTENT");
+    expect(JSON.stringify(result.details)).not.toContain("SECOND_SECRET_CONTENT");
+    expect(result.content[0]!.text).not.toContain("FIRST_SECRET_CONTENT");
+    expect(result.content[0]!.text).not.toContain("SECOND_SECRET_CONTENT");
+  });
+
+  it("rejects requests that mix contextPath and contextPaths before execution", async () => {
+    const result = await executeLambdaRlmTool({ contextPath: "one.txt", contextPaths: ["two.txt"], question: "What?" });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "validation_failed",
+      error: { type: "validation", code: "mixed_context_path_fields", field: "contextPaths" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
+    });
+  });
+
+  it("fails before execution when one contextPaths entry is missing", async () => {
+    const existing = await tempContextFile("exists");
+
+    const result = await executeLambdaRlmTool({ contextPaths: [existing, "/definitely/missing/multi.txt"], question: "What?" });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "validation_failed",
+      error: { type: "validation", code: "missing_context_path_file", field: "contextPaths" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
+    });
+    expect(result.details).not.toHaveProperty("partialRun");
+  });
+
+  it("fails before execution when one contextPaths entry is unreadable", async () => {
+    const existing = await tempContextFile("exists");
+    const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-multi-unreadable-"));
+
+    const result = await executeLambdaRlmTool({ contextPaths: [existing, dir], question: "What?" });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "validation_failed",
+      error: { type: "validation", code: "unreadable_context_path", field: "contextPaths" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
+    });
+  });
+
+  it("enforces max input bytes across all contextPaths before invoking the bridge", async () => {
+    const first = await tempContextFile("12345");
+    const second = await tempContextFile("67890");
+    let bridgeStarted = false;
+
+    const result = await executeLambdaRlmTool(
+      { contextPaths: [first, second], question: "Too large?", maxInputBytes: 9 },
+      { leafProcessRunner: async () => { bridgeStarted = true; return { exitCode: 0, stdout: "", stderr: "" }; } },
+    );
+
+    expect(bridgeStarted).toBe(false);
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "validation_failed",
+      error: { type: "validation", code: "max_input_bytes_exceeded", field: "contextPaths" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
+    });
+  });
+
+  it("uses one consolidated bridge request for multiple contextPaths", async () => {
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3\nimport json, sys\nrequest = json.loads(sys.stdin.readline())\ncontext = request["input"].get("context", "")\nassert "--- BEGIN SOURCE 1:" in context and "--- BEGIN SOURCE 2:" in context\nassert request["input"]["question"] == "Consolidated?"\nprint(json.dumps({"type":"model_callback_request","runId":request["runId"],"requestId":"model-call-1","prompt":context,"metadata":{"phase":"leaf"}}), flush=True)\nresponse = json.loads(sys.stdin.readline())\nprint(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"content":"consolidated answer","modelCalls":1}), flush=True)\n`);
+    const first = await tempContextFile("alpha");
+    const second = await tempContextFile("beta");
+    let leafCalls = 0;
+
+    const result = await executeLambdaRlmTool(
+      { contextPaths: [first, second], question: "Consolidated?" },
+      { bridgePath, leafProcessRunner: async () => { leafCalls += 1; return { exitCode: 0, stdout: "ok\n", stderr: "" }; } },
+    );
+
+    expect(leafCalls).toBe(1);
+    expect(result.details).toMatchObject({ ok: true, bridgeRun: { finalResults: 1, childPiLeafCalls: 1 } });
   });
 
   it("returns structured cancellation failure and aborts the active leaf through the tool boundary", async () => {

@@ -6,7 +6,7 @@ import { ModelCallQueueCancelledError } from "./modelCallQueue.js";
 export type BridgeRunRequest = {
   type: "run_request";
   runId: string;
-  input: { contextPath: string; question: string };
+  input: { contextPath: string; question: string; context?: string };
   lambdaRlm?: { contextWindowChars?: number };
 };
 
@@ -110,6 +110,7 @@ export async function runSyntheticBridge(options: {
   runId: string;
   contextPath: string;
   question: string;
+  context?: string;
   modelCallRunner: ModelCallRunner;
   pythonPath?: string;
   bridgeArgs?: string[];
@@ -355,7 +356,7 @@ export async function runSyntheticBridge(options: {
   const request: BridgeRunRequest = {
     type: "run_request",
     runId: options.runId,
-    input: { contextPath: options.contextPath, question: options.question },
+    input: { contextPath: options.contextPath, question: options.question, ...(options.context !== undefined ? { context: options.context } : {}) },
     ...(options.contextWindowChars !== undefined ? { lambdaRlm: { contextWindowChars: options.contextWindowChars } } : {}),
   };
   child.stdin.write(JSON.stringify(request) + "\n");
