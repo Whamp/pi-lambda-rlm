@@ -24,12 +24,12 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
     name: "lambda_rlm",
     label: "λ-RLM",
     description:
-      "Fake single-file Lambda-RLM long-context QA tool. Accepts only contextPath plus question, reads the file internally, and returns bounded fake results for bootstrap testing.",
+      "Synthetic Lambda-RLM NDJSON bridge tracer bullet. Accepts only contextPath plus question, reads the file internally, and services one fake model callback through a Python child process.",
     promptSnippet: "Ask a question over one referenced context file without inlining file contents",
     promptGuidelines: [
       "Use lambda_rlm when a user asks a question over a large file by path and ordinary reading would waste parent-agent context.",
       "Call lambda_rlm with contextPath and question only; do not pass inline context, raw prompts, or multiple paths in this bootstrap slice.",
-      "lambda_rlm currently returns a fake bounded answer that proves the path-only contract; it does not run Python, real Lambda-RLM, or child Pi calls yet.",
+      "lambda_rlm currently runs a synthetic Python NDJSON bridge only; it does not run real Lambda-RLM or real child Pi calls yet.",
     ],
     parameters: LambdaRlmToolParameters,
     async execute(
@@ -44,7 +44,7 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
         details: { phase: "validate" },
       });
       try {
-        return await executeLambdaRlmTool(params, { cwd: ctx.cwd });
+        return await executeLambdaRlmTool(params, { cwd: ctx.cwd, ...(_signal ? { signal: _signal } : {}) });
       } catch (error) {
         if (error instanceof LambdaRlmValidationError) {
           return {

@@ -11,8 +11,8 @@ async function tempContextFile(content: string) {
   return path;
 }
 
-describe("fake lambda_rlm tool execution", () => {
-  it("reads contextPath internally and returns a bounded fake result without dumping source content", async () => {
+describe("synthetic bridge lambda_rlm tool execution", () => {
+  it("reads contextPath internally, runs the synthetic Python bridge, and returns a bounded result without dumping source content", async () => {
     const secretContent = "SECRET_SOURCE_CONTENT_SHOULD_NOT_BE_RETURNED\n".repeat(20);
     const contextPath = await tempContextFile(secretContent);
 
@@ -20,7 +20,7 @@ describe("fake lambda_rlm tool execution", () => {
 
     expect(result.content[0]).toMatchObject({ type: "text" });
     const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-    expect(text).toContain("Fake λ-RLM answer");
+    expect(text).toContain("Synthetic λ-RLM bridge answer");
     expect(text).toContain("What is this file about?");
     expect(text.length).toBeLessThanOrEqual(4096);
     expect(text).not.toContain("SECRET_SOURCE_CONTENT_SHOULD_NOT_BE_RETURNED");
@@ -33,8 +33,17 @@ describe("fake lambda_rlm tool execution", () => {
         contextChars: secretContent.length,
         questionChars: "What is this file about?".length,
       },
+      bridgeRun: {
+        executionStarted: true,
+        pythonBridge: true,
+        protocol: "strict-stdout-stdin-ndjson",
+        stdoutProtocolLines: 2,
+        finalResults: 1,
+        realLambdaRlm: false,
+        childPiLeafCalls: 0,
+      },
       fakeRun: {
-        engine: "fake-single-file-lambda-rlm",
+        engine: "synthetic-python-ndjson-bridge",
         executionStarted: true,
       },
       output: {
