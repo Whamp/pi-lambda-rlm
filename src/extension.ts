@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { executeLambdaRlmTool, LambdaRlmValidationError } from "./lambdaRlmTool.js";
 import type { ProcessRunner } from "./leafRunner.js";
+import type { ModelCallConcurrencyQueue } from "./modelCallQueue.js";
 
 export const LambdaRlmToolParameters = Type.Object(
   {
@@ -48,6 +49,8 @@ type MinimalExtensionContext = {
 };
 
 export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
+  const modelCallQueueState: { current?: ModelCallConcurrencyQueue } = {};
+
   pi.registerTool({
     name: "lambda_rlm",
     label: "λ-RLM",
@@ -83,6 +86,7 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
           cwd: ctx.cwd,
           ...(ctx.leafProcessRunner ? { leafProcessRunner: ctx.leafProcessRunner } : {}),
           ...(_signal ? { signal: _signal } : {}),
+          modelCallQueueState,
         });
       } catch (error) {
         if (error instanceof LambdaRlmValidationError) {

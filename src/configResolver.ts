@@ -9,6 +9,7 @@ export type RunConfig = {
   maxModelCalls: number;
   wholeRunTimeoutMs: number;
   modelCallTimeoutMs: number;
+  modelProcessConcurrency: number;
 };
 
 export type ConfigValidationError = {
@@ -27,6 +28,7 @@ export const DEFAULT_RUN_CONFIG: RunConfig = {
   maxModelCalls: 1_000,
   wholeRunTimeoutMs: 300_000,
   modelCallTimeoutMs: 60_000,
+  modelProcessConcurrency: 2,
 };
 
 type Overlay = Partial<RunConfig>;
@@ -39,6 +41,7 @@ const TOML_TO_CONFIG: Record<string, keyof RunConfig> = {
   max_model_calls: "maxModelCalls",
   whole_run_timeout_ms: "wholeRunTimeoutMs",
   model_call_timeout_ms: "modelCallTimeoutMs",
+  model_process_concurrency: "modelProcessConcurrency",
 };
 
 const CONFIG_FIELDS = new Set<keyof RunConfig>([
@@ -48,6 +51,7 @@ const CONFIG_FIELDS = new Set<keyof RunConfig>([
   "maxModelCalls",
   "wholeRunTimeoutMs",
   "modelCallTimeoutMs",
+  "modelProcessConcurrency",
 ]);
 
 function validationError(code: string, message: string, field: string): ConfigValidationError {
@@ -104,7 +108,7 @@ export function parseConfigToml(toml: string, source: "global" | "project" = "gl
     const tomlKey = assignment[1] ?? "";
     const configKey = TOML_TO_CONFIG[tomlKey];
     if (!configKey) {
-      return { ok: false, error: validationError("unknown_config_key", `Unknown [run] key ${tomlKey}. Supported keys: max_input_bytes, output_max_bytes, output_max_lines, max_model_calls, whole_run_timeout_ms, model_call_timeout_ms.`, `run.${tomlKey}`) };
+      return { ok: false, error: validationError("unknown_config_key", `Unknown [run] key ${tomlKey}. Supported keys: max_input_bytes, output_max_bytes, output_max_lines, max_model_calls, whole_run_timeout_ms, model_call_timeout_ms, model_process_concurrency.`, `run.${tomlKey}`) };
     }
     if (seenKeys.has(tomlKey)) {
       return { ok: false, error: validationError("invalid_toml", `Duplicate [run] key ${tomlKey} in ${source} config at line ${lineNumber}.`, `run.${tomlKey}`) };

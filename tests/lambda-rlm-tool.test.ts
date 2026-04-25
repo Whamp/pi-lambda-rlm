@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { executeLambdaRlmTool, LambdaRlmValidationError } from "../src/lambdaRlmTool.js";
+import { ModelCallConcurrencyQueue } from "../src/modelCallQueue.js";
 
 async function tempContextFile(content: string) {
   const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-test-"));
@@ -17,6 +18,27 @@ async function tempPythonBridgeScript(source: string) {
   await writeFile(path, source, "utf8");
   await chmod(path, 0o755);
   return path;
+}
+
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+async function tick() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
@@ -99,6 +121,50 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
     expect(processCalls[0]?.args).toEqual(
       expect.arrayContaining(["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates"]),
     );
+  });
+
+  it("shares one configured model-process queue across simultaneous tool runs", async () => {
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import json, sys
+request = json.loads(sys.stdin.readline())
+prompt = "queued prompt for " + request["input"]["question"]
+print(json.dumps({"type":"model_callback_request","runId":request["runId"],"requestId":"model-call-1","prompt":prompt,"metadata":{"phase":"leaf"}}), flush=True)
+response = json.loads(sys.stdin.readline())
+print(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"content":response.get("content", ""),"modelCalls":1}), flush=True)
+`);
+    const contextPath = await tempContextFile("queue context");
+    const queue = new ModelCallConcurrencyQueue({ concurrency: 1 });
+    const releaseFirst = deferred();
+    const starts: string[] = [];
+
+    const sharedLeafProcessRunner = async (invocation: { args: string[] }) => {
+      const promptFile = invocation.args.at(-1);
+      const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
+      starts.push(prompt);
+      if (starts.length === 1) await releaseFirst.promise;
+      const answer = prompt.includes("run A") ? "answer A" : "answer B";
+      return { exitCode: 0, stdout: `${answer}\n`, stderr: "" };
+    };
+
+    const runA = executeLambdaRlmTool(
+      { contextPath, question: "run A" },
+      { bridgePath, modelCallQueue: queue, leafProcessRunner: sharedLeafProcessRunner },
+    );
+    const runB = executeLambdaRlmTool(
+      { contextPath, question: "run B" },
+      { bridgePath, modelCallQueue: queue, leafProcessRunner: sharedLeafProcessRunner },
+    );
+
+    await waitUntil(() => starts.length === 1 && queue.snapshot().queued === 1);
+    expect(starts).toHaveLength(1);
+    expect(queue.snapshot()).toEqual({ concurrency: 1, active: 1, queued: 1 });
+
+    releaseFirst.resolve();
+    const [resultA, resultB] = await Promise.all([runA, runB]);
+    expect(resultA.details).toMatchObject({ ok: true });
+    expect(resultB.details).toMatchObject({ ok: true });
+    expect(starts).toEqual(expect.arrayContaining([expect.stringContaining("run A"), expect.stringContaining("run B")]));
+    expect(queue.snapshot()).toEqual({ concurrency: 1, active: 0, queued: 0 });
   });
 
   it("returns a structured runtime failure with child process diagnostics when the constrained leaf process exits non-zero", async () => {

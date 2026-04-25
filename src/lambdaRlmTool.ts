@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { BridgeProtocolError, BridgeRunFailedError, runSyntheticBridge } from "./bridgeRunner.js";
 import { resolveRunConfig, type RunConfig } from "./configResolver.js";
 import { runFormalPiLeafModelCall, type LeafThinking, type ProcessRunner } from "./leafRunner.js";
+import { ModelCallConcurrencyQueue } from "./modelCallQueue.js";
 import {
   DEFAULT_VISIBLE_OUTPUT_LIMIT,
   countLines,
@@ -172,6 +173,10 @@ export async function executeLambdaRlmTool(
     projectConfigPath?: string;
     /** Optional directory for recoverable full output when truncation occurs. */
     fullOutputDir?: string;
+    /** Extension-scoped queue injection for tests/host integration. */
+    modelCallQueue?: ModelCallConcurrencyQueue;
+    /** Mutable extension-instance state used to lazily create one shared queue after config resolution. */
+    modelCallQueueState?: { current?: ModelCallConcurrencyQueue };
   } = {},
 ): Promise<LambdaRlmToolResult> {
   let validated: LambdaRlmParams;
@@ -221,6 +226,12 @@ export async function executeLambdaRlmTool(
   const runId = `lambda-rlm-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const leafModel = options.leafModel ?? process.env.LAMBDA_RLM_LEAF_MODEL ?? "google/gemini-3-flash-preview";
   const leafThinking = options.leafThinking ?? "off";
+  const modelCallQueue =
+    options.modelCallQueue ??
+    (options.modelCallQueueState
+      ? (options.modelCallQueueState.current ??= new ModelCallConcurrencyQueue({ concurrency: runConfig.modelProcessConcurrency }))
+      : new ModelCallConcurrencyQueue({ concurrency: runConfig.modelProcessConcurrency }));
+
   const outputOptions = {
     maxVisibleChars: options.outputMaxVisibleChars ?? DEFAULT_VISIBLE_OUTPUT_LIMIT,
     maxVisibleBytes: runConfig.outputMaxBytes,
@@ -237,14 +248,16 @@ export async function executeLambdaRlmTool(
       contextPath: loaded.resolvedPath,
       question: validated.question,
       modelCallRunner: (call) =>
-        runFormalPiLeafModelCall(call, {
-          ...(options.piExecutable ? { piExecutable: options.piExecutable } : {}),
-          leafModel,
-          leafThinking,
-          timeoutMs: options.leafTimeoutMs !== undefined ? Math.min(options.leafTimeoutMs, runConfig.modelCallTimeoutMs) : runConfig.modelCallTimeoutMs,
-          ...(call.signal ? { signal: call.signal } : {}),
-          ...(options.leafProcessRunner ? { processRunner: options.leafProcessRunner } : {}),
-        }),
+        modelCallQueue.run(call, (queuedCall) =>
+          runFormalPiLeafModelCall(queuedCall, {
+            ...(options.piExecutable ? { piExecutable: options.piExecutable } : {}),
+            leafModel,
+            leafThinking,
+            timeoutMs: options.leafTimeoutMs !== undefined ? Math.min(options.leafTimeoutMs, runConfig.modelCallTimeoutMs) : runConfig.modelCallTimeoutMs,
+            ...(queuedCall.signal ? { signal: queuedCall.signal } : {}),
+            ...(options.leafProcessRunner ? { processRunner: options.leafProcessRunner } : {}),
+          }),
+        ),
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.contextWindowChars !== undefined ? { contextWindowChars: options.contextWindowChars } : {}),
       maxModelCalls: runConfig.maxModelCalls,
