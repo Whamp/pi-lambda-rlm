@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "test": "vitest run",
+    "test:pi-leaf-smoke": "vitest run tests/pi-leaf-smoke.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

@@ -97,6 +97,23 @@ def main() -> int:
     if response.get("type") != "model_callback_response" or response.get("runId") != run_id or response.get("requestId") != "model-call-1":
         error_result(run_id, "invalid_model_callback_response", "Expected model_callback_response for model-call-1.")
         return 0
+    if response.get("ok") is False:
+        error = response.get("error") if isinstance(response.get("error"), dict) else {}
+        message = error.get("message") if isinstance(error, dict) else None
+        emit_stdout(
+            {
+                "type": "run_result",
+                "runId": run_id,
+                "ok": False,
+                "error": {
+                    "type": "model_callback_failure",
+                    "code": "model_callback_failed",
+                    "message": message if isinstance(message, str) else "Model callback failed.",
+                },
+                "modelCalls": 1,
+            }
+        )
+        return 0
     if response.get("ok") is not True or not isinstance(response.get("content"), str):
         error_result(run_id, "invalid_model_callback_response", "model_callback_response must be ok with string content.")
         return 0

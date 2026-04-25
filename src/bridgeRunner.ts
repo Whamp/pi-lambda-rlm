@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import type { LeafModelCallFailureDetails, LeafModelCallSuccess, ModelCall } from "./leafRunner.js";
 
 export type BridgeRunRequest = {
   type: "run_request";
@@ -15,6 +16,10 @@ export type ModelCallbackRequest = {
   metadata?: Record<string, unknown>;
 };
 
+export type ModelCallbackResponse = LeafModelCallSuccess | LeafModelCallFailureDetails;
+
+export type ModelCallRunner = (call: ModelCall) => Promise<ModelCallbackResponse>;
+
 export type BridgeRunResult = {
   type: "run_result";
   runId: string;
@@ -25,6 +30,7 @@ export type BridgeRunResult = {
 
 export type CompletedSyntheticBridgeRun = BridgeRunResult & {
   modelCallbacks: Array<Omit<ModelCallbackRequest, "type" | "runId">>;
+  modelCallResponses: ModelCallbackResponse[];
   finalResults: BridgeRunResult[];
   stdoutLines: string[];
   stderr: string;
@@ -53,7 +59,7 @@ export async function runSyntheticBridge(options: {
   runId: string;
   contextPath: string;
   question: string;
-  fakeModelResponse: string;
+  modelCallRunner: ModelCallRunner;
   pythonPath?: string;
   bridgeArgs?: string[];
   signal?: AbortSignal;
@@ -67,6 +73,7 @@ export async function runSyntheticBridge(options: {
   const stdoutLines: string[] = [];
   let stderr = "";
   const callbacks: Array<Omit<ModelCallbackRequest, "type" | "runId">> = [];
+  const modelCallResponses: ModelCallbackResponse[] = [];
   const finalResults: BridgeRunResult[] = [];
   let pendingCallbackId: string | undefined;
   let settled = false;
@@ -116,31 +123,52 @@ export async function runSyntheticBridge(options: {
           return;
         }
         pendingCallbackId = typed.requestId;
-        callbacks.push({
+        const call: ModelCall = {
           requestId: typed.requestId,
           prompt: typed.prompt,
           ...(typeof typed.metadata === "object" && typed.metadata && !Array.isArray(typed.metadata)
             ? { metadata: typed.metadata as Record<string, unknown> }
             : {}),
-        });
-        setImmediate(() => {
-          if (!settled && child.stdin.writable) {
-            child.stdin.write(
-              JSON.stringify({
-                type: "model_callback_response",
-                runId: options.runId,
-                requestId: pendingCallbackId,
-                ok: true,
-                content: options.fakeModelResponse,
-              }) + "\n",
-            );
-            pendingCallbackId = undefined;
-          }
-        });
+        };
+        callbacks.push(call);
+        void options
+          .modelCallRunner(call)
+          .then((response) => {
+            if (!settled && child.stdin.writable) {
+              modelCallResponses.push(response);
+              child.stdin.write(JSON.stringify({ type: "model_callback_response", runId: options.runId, ...response }) + "\n");
+              pendingCallbackId = undefined;
+            }
+          })
+          .catch((error: unknown) => {
+            if (!settled && child.stdin.writable) {
+              const message = error instanceof Error ? error.message : String(error);
+              const response: LeafModelCallFailureDetails = {
+                ok: false,
+                requestId: call.requestId,
+                error: { type: "child_process", code: "model_call_runner_error", message },
+                diagnostics: { stdout: "", stderr: "", exitCode: null },
+              };
+              modelCallResponses.push(response);
+              child.stdin.write(JSON.stringify({ type: "model_callback_response", runId: options.runId, ...response }) + "\n");
+              pendingCallbackId = undefined;
+            }
+          });
         return;
       }
 
       if (typed.type === "run_result") {
+        if (typed.ok === false) {
+          const error = typed.error as Record<string, unknown> | undefined;
+          fail(
+            protocolError(
+              "bridge_run_failed",
+              typeof error?.message === "string" ? error.message : "Bridge returned a structured failure result.",
+              line,
+            ),
+          );
+          return;
+        }
         if (typed.ok !== true || typed.runId !== options.runId || typeof typed.content !== "string") {
           fail(protocolError("invalid_run_result", "Bridge final run result was malformed.", line));
           return;
@@ -180,7 +208,7 @@ export async function runSyntheticBridge(options: {
         return;
       }
       settled = true;
-      resolve({ ...finalResult, modelCallbacks: callbacks, finalResults, stdoutLines, stderr });
+      resolve({ ...finalResult, modelCallbacks: callbacks, modelCallResponses, finalResults, stdoutLines, stderr });
     });
   });
 
