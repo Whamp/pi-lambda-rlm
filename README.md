@@ -7,7 +7,10 @@ Pi custom tool named `lambda_rlm` for bounded long-context file QA through a rea
 The agent-facing tool accepts path-based context ingestion only:
 
 - `contextPath` — one file path, optionally prefixed with `@`.
-- `question` — the question to answer over the file.
+- `contextPaths` — an ordered array of one or more file paths for a single consolidated multi-source run.
+- `question` — the question to answer over the referenced file(s).
+
+Pass exactly one of `contextPath` or `contextPaths`; requests that mix both fields fail validation before execution.
 - Optional per-run tightening only: `maxInputBytes`, `outputMaxBytes`, `outputMaxLines`, `maxModelCalls`, `wholeRunTimeoutMs`, `modelCallTimeoutMs`.
 
 Inline/raw context and raw prompts are rejected so source material is read internally by the tool instead of being stuffed into the parent agent context.
@@ -38,9 +41,25 @@ model_process_concurrency = 2
 
 Missing keys inherit from lower-precedence layers. Invalid TOML, unknown tables/keys, and invalid values fail before execution with actionable structured validation errors.
 
+## Source manifests and bounded results
+
+For `contextPaths`, the TypeScript tool reads each file internally in the provided order, enforces `max_input_bytes` across all files, and assembles one internal context with a source manifest plus source-delimited sections:
+
+```text
+Sources:
+[1] path/to/a.txt (123 bytes)
+[2] path/to/b.txt (456 bytes)
+
+--- BEGIN SOURCE 1: path/to/a.txt ---
+...
+--- END SOURCE 1 ---
+```
+
+The Python bridge receives this assembled context as one Lambda-RLM task. Public results include compact source metadata (`sourceNumber`, path, resolved path, bytes, chars, lines, sha256) but do not return full source contents by default.
+
 ## Enforced run controls in this slice
 
-- `max_input_bytes` is enforced after internal file stat/read and before the real bridge path starts.
+- `max_input_bytes` is enforced after internal file stat/read across one or all source files and before the real bridge path starts.
 - `max_model_calls` is enforced by the TypeScript bridge runner before each child Pi leaf process starts.
 - `whole_run_timeout_ms` aborts the Python bridge and returns a structured runtime failure with partial details.
 - `model_call_timeout_ms` aborts a stuck child Pi leaf call and returns a structured runtime failure with partial details.
@@ -48,7 +67,7 @@ Missing keys inherit from lower-precedence layers. Invalid TOML, unknown tables/
 - Tool cancellation aborts the Python bridge and propagates an abort signal to active or queued child Pi leaf calls. Queued calls cancelled before capacity is available do not start.
 - `output_max_bytes` and `output_max_lines` bound visible tool output on success and runtime failure, with optional recoverable full-output file support for tests/internal callers.
 
-Multi-file input, metadata expansion, and prompt overlays are deferred to later issues.
+Metadata expansion beyond source metadata and prompt overlays are deferred to later issues.
 
 ## Scripts
 

@@ -5,13 +5,17 @@ import type { ModelCallConcurrencyQueue } from "./modelCallQueue.js";
 
 export const LambdaRlmToolParameters = Type.Object(
   {
-    contextPath: Type.String({
+    contextPath: Type.Optional(Type.String({
       minLength: 1,
-      description: "Path to a single UTF-8 text file. The lambda_rlm tool reads this file internally; do not inline file contents.",
-    }),
+      description: "Path to one UTF-8 text file. Pass exactly one of contextPath or contextPaths. The lambda_rlm tool reads this file internally; do not inline file contents.",
+    })),
+    contextPaths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
+      minItems: 1,
+      description: "Ordered UTF-8 text file paths for one consolidated Lambda-RLM run. Pass exactly one of contextPath or contextPaths; do not inline file contents.",
+    })),
     question: Type.String({
       minLength: 1,
-      description: "Question or instruction to answer using the referenced context file.",
+      description: "Question or instruction to answer using the referenced context file(s).",
     }),
     maxInputBytes: Type.Optional(Type.Number({
       minimum: 1,
@@ -38,7 +42,13 @@ export const LambdaRlmToolParameters = Type.Object(
       description: "Optional per-run tightening for each Formal Leaf model callback timeout in milliseconds; must be less than or equal to the resolved config limit.",
     })),
   },
-  { additionalProperties: false },
+  {
+    additionalProperties: false,
+    oneOf: [
+      { required: ["contextPath", "question"], not: { required: ["contextPaths"] } },
+      { required: ["contextPaths", "question"], not: { required: ["contextPath"] } },
+    ],
+  },
 );
 
 type ToolUpdate = { content: Array<{ type: "text"; text: string }>; details?: Record<string, unknown> };
@@ -55,12 +65,12 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
     name: "lambda_rlm",
     label: "λ-RLM",
     description:
-      "Runs real vendored Lambda-RLM over one path-based context file through the Python NDJSON bridge, using extension-owned Formal Leaf model callbacks and returning a bounded answer.",
-    promptSnippet: "Ask a question over one referenced context file without inlining file contents",
+      "Runs real vendored Lambda-RLM over one or more path-based context files through the Python NDJSON bridge, using extension-owned Formal Leaf model callbacks and returning a bounded answer.",
+    promptSnippet: "Ask a question over referenced context file(s) without inlining file contents",
     promptGuidelines: [
-      "Use lambda_rlm when a user asks a question over a large file by path and ordinary reading would waste parent-agent context.",
-      "Call lambda_rlm with contextPath and question, plus optional per-run tightening limits maxInputBytes/outputMaxBytes/outputMaxLines/maxModelCalls/wholeRunTimeoutMs/modelCallTimeoutMs when needed; do not pass inline context, raw prompts, or multiple paths.",
-      "lambda_rlm reads the path-based single-file input internally, runs vendored real Lambda-RLM planning and execution through the Python NDJSON bridge, and services model callbacks with extension-owned Formal Leaf child Pi calls.",
+      "Use lambda_rlm when a user asks a question over one or more large files by path and ordinary reading would waste parent-agent context.",
+      "Call lambda_rlm with exactly one of contextPath or contextPaths plus question, plus optional per-run tightening limits maxInputBytes/outputMaxBytes/outputMaxLines/maxModelCalls/wholeRunTimeoutMs/modelCallTimeoutMs when needed; do not pass inline context or raw prompts.",
+      "lambda_rlm reads path-based source input internally, assembles contextPaths into a source manifest plus source-delimited context for one consolidated run, runs vendored real Lambda-RLM planning and execution through the Python NDJSON bridge, and services model callbacks with extension-owned Formal Leaf child Pi calls.",
       "Use maxModelCalls, wholeRunTimeoutMs, and modelCallTimeoutMs only to tighten budgets/deadlines for a single run; they cannot loosen configured defaults.",
       "Expect a bounded result; the tool should not expose the full source file contents by default.",
     ],
@@ -76,7 +86,7 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
         content: [
           {
             type: "text",
-            text: "λ-RLM real path-based run: validating contextPath before starting the Python NDJSON bridge, vendored Lambda-RLM, and Formal Leaf callbacks.",
+            text: "λ-RLM real path-based run: validating contextPath/contextPaths before starting the Python NDJSON bridge, vendored Lambda-RLM, and Formal Leaf callbacks.",
           },
         ],
         details: { phase: "validate" },

@@ -1,4 +1,5 @@
-import { readFile, stat } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BridgeProtocolError, BridgeRunFailedError, runSyntheticBridge } from "./bridgeRunner.js";
@@ -18,6 +19,7 @@ import {
 
 const ALLOWED_KEYS = new Set([
   "contextPath",
+  "contextPaths",
   "question",
   "maxInputBytes",
   "outputMaxBytes",
@@ -28,7 +30,8 @@ const ALLOWED_KEYS = new Set([
 ]);
 
 export type LambdaRlmParams = {
-  contextPath: string;
+  contextPath?: string;
+  contextPaths?: string[];
   question: string;
   maxInputBytes?: number;
   outputMaxBytes?: number;
@@ -77,16 +80,36 @@ export function validateLambdaRlmParams(value: unknown): LambdaRlmParams {
 
   const extraKeys = Object.keys(value).filter((key) => !ALLOWED_KEYS.has(key));
   if (extraKeys.length > 0) {
-    const ambiguous = extraKeys.some((key) => ["context", "prompt", "rawPrompt", "contextPaths", "path", "paths"].includes(key));
+    const ambiguous = extraKeys.some((key) => ["context", "prompt", "rawPrompt", "path", "paths"].includes(key));
     throw new LambdaRlmValidationError(
       ambiguous ? "unsupported_input" : "unknown_keys",
-      `lambda_rlm only accepts contextPath and question. Rejected key(s): ${extraKeys.join(", ")}.`,
+      `lambda_rlm only accepts exactly one of contextPath or contextPaths plus question. Rejected key(s): ${extraKeys.join(", ")}.`,
     );
   }
 
+  const hasContextPath = value.contextPath !== undefined;
+  const hasContextPaths = value.contextPaths !== undefined;
+  if (hasContextPath && hasContextPaths) {
+    throw new LambdaRlmValidationError("mixed_context_path_fields", "Pass exactly one of contextPath or contextPaths, not both.", "contextPaths");
+  }
+  if (!hasContextPath && !hasContextPaths) {
+    throw new LambdaRlmValidationError("missing_context_path", "contextPath or contextPaths is required.", "contextPath");
+  }
+
   const contextPath = typeof value.contextPath === "string" ? value.contextPath.trim() : "";
-  if (!contextPath) {
+  if (hasContextPath && !contextPath) {
     throw new LambdaRlmValidationError("missing_context_path", "contextPath is required and must be a non-empty string.", "contextPath");
+  }
+
+  let contextPaths: string[] | undefined;
+  if (hasContextPaths) {
+    if (!Array.isArray(value.contextPaths) || value.contextPaths.length === 0) {
+      throw new LambdaRlmValidationError("invalid_context_paths", "contextPaths must be a non-empty array of non-empty strings.", "contextPaths");
+    }
+    contextPaths = value.contextPaths.map((entry) => (typeof entry === "string" ? entry.trim() : ""));
+    if (contextPaths.some((entry) => !entry)) {
+      throw new LambdaRlmValidationError("invalid_context_paths", "contextPaths must be a non-empty array of non-empty strings.", "contextPaths");
+    }
   }
 
   const question = typeof value.question === "string" ? value.question.trim() : "";
@@ -104,45 +127,69 @@ export function validateLambdaRlmParams(value: unknown): LambdaRlmParams {
     }
   }
 
-  return { contextPath, question, ...perRun };
+  if (hasContextPath) {
+    return { contextPath, question, ...perRun };
+  }
+  return { contextPaths: contextPaths!, question, ...perRun };
 }
 
-function maxInputBytesError(bytes: number, maxInputBytes: number) {
+function maxInputBytesError(bytes: number, maxInputBytes: number, field: "contextPath" | "contextPaths") {
   return new LambdaRlmValidationError(
     "max_input_bytes_exceeded",
-    `contextPath is ${bytes} bytes, exceeding the resolved max_input_bytes limit of ${maxInputBytes}.`,
-    "contextPath",
+    `${field} total is ${bytes} bytes, exceeding the resolved max_input_bytes limit of ${maxInputBytes}.`,
+    field,
   );
 }
 
-async function loadContextFile(contextPath: string, cwd: string, maxInputBytes: number) {
-  const normalizedPath = contextPath.startsWith("@") ? contextPath.slice(1) : contextPath;
-  const resolvedPath = resolve(cwd, normalizedPath);
+type LoadedSource = { sourceNumber: number; path: string; resolvedPath: string; content: string; bytes: number };
 
-  try {
-    const fileStat = await stat(resolvedPath);
-    if (!fileStat.isFile()) {
-      throw new LambdaRlmValidationError("unreadable_context_path", `contextPath is not a readable file: ${contextPath}`, "contextPath");
-    }
-    if (fileStat.size > maxInputBytes) {
-      throw maxInputBytesError(fileStat.size, maxInputBytes);
-    }
+async function loadContextSources(contextPaths: string[], cwd: string, maxInputBytes: number, field: "contextPath" | "contextPaths") {
+  const prepared: Array<{ sourceNumber: number; path: string; resolvedPath: string; statBytes: number }> = [];
+  let statTotal = 0;
 
-    const content = await readFile(resolvedPath, "utf8");
-    const bytes = Buffer.byteLength(content, "utf8");
-    if (bytes > maxInputBytes) {
-      throw maxInputBytesError(bytes, maxInputBytes);
+  for (const [index, contextPath] of contextPaths.entries()) {
+    const normalizedPath = contextPath.startsWith("@") ? contextPath.slice(1) : contextPath;
+    const resolvedPath = resolve(cwd, normalizedPath);
+    try {
+      const fileStat = await stat(resolvedPath);
+      if (!fileStat.isFile()) {
+        throw new LambdaRlmValidationError("unreadable_context_path", `${field} entry is not a readable file: ${contextPath}`, field);
+      }
+      statTotal += fileStat.size;
+      if (statTotal > maxInputBytes) {
+        throw maxInputBytesError(statTotal, maxInputBytes, field);
+      }
+      await access(resolvedPath, fsConstants.R_OK);
+      prepared.push({ sourceNumber: index + 1, path: contextPath, resolvedPath, statBytes: fileStat.size });
+    } catch (error) {
+      if (error instanceof LambdaRlmValidationError) throw error;
+      const code = (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing_context_path_file" : "unreadable_context_path";
+      throw new LambdaRlmValidationError(code, `Unable to read ${field} before execution: ${contextPath}`, field);
     }
-    return { resolvedPath, content, bytes };
-  } catch (error) {
-    if (error instanceof LambdaRlmValidationError) throw error;
-    const code = (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing_context_path_file" : "unreadable_context_path";
-    throw new LambdaRlmValidationError(code, `Unable to read contextPath before execution: ${contextPath}`, "contextPath");
   }
+
+  const loaded: LoadedSource[] = [];
+  let readTotal = 0;
+  for (const source of prepared) {
+    try {
+      const content = await readFile(source.resolvedPath, "utf8");
+      const bytes = Buffer.byteLength(content, "utf8");
+      readTotal += bytes;
+      if (readTotal > maxInputBytes) {
+        throw maxInputBytesError(readTotal, maxInputBytes, field);
+      }
+      loaded.push({ sourceNumber: source.sourceNumber, path: source.path, resolvedPath: source.resolvedPath, content, bytes });
+    } catch (error) {
+      if (error instanceof LambdaRlmValidationError) throw error;
+      throw new LambdaRlmValidationError("unreadable_context_path", `Unable to read ${field} before execution: ${source.path}`, field);
+    }
+  }
+  return loaded;
 }
 
-function toSourceMetadata(input: { path: string; resolvedPath: string; content: string; bytes: number }): SourceMetadata {
+function toSourceMetadata(input: LoadedSource): SourceMetadata {
   return {
+    sourceNumber: input.sourceNumber,
     path: input.path,
     resolvedPath: input.resolvedPath,
     bytes: input.bytes,
@@ -150,6 +197,15 @@ function toSourceMetadata(input: { path: string; resolvedPath: string; content: 
     lines: countLines(input.content),
     sha256: sha256Hex(input.content),
   };
+}
+
+function assembleSourceContext(sources: LoadedSource[]) {
+  if (sources.length === 1) return sources[0]!.content;
+  const manifest = ["Sources:", ...sources.map((source) => `[${source.sourceNumber}] ${source.path} (${source.bytes} bytes)`)].join("\n");
+  const delimited = sources
+    .map((source) => [`--- BEGIN SOURCE ${source.sourceNumber}: ${source.path} ---`, source.content, `--- END SOURCE ${source.sourceNumber} ---`].join("\n"))
+    .join("\n\n");
+  return `${manifest}\n\n${delimited}`;
 }
 
 export async function executeLambdaRlmTool(
@@ -212,16 +268,19 @@ export async function executeLambdaRlmTool(
     runConfig = { ...runConfig, outputMaxBytes: Math.min(runConfig.outputMaxBytes, options.outputMaxVisibleChars) };
   }
 
-  let loaded: Awaited<ReturnType<typeof loadContextFile>>;
+  const contextPaths = validated.contextPaths ?? [validated.contextPath!];
+  const contextField = validated.contextPaths ? "contextPaths" : "contextPath";
+  let loadedSources: Awaited<ReturnType<typeof loadContextSources>>;
   try {
-    loaded = await loadContextFile(validated.contextPath, cwd, runConfig.maxInputBytes);
+    loadedSources = await loadContextSources(contextPaths, cwd, runConfig.maxInputBytes, contextField);
   } catch (error) {
     if (error instanceof LambdaRlmValidationError) {
       return formatValidationFailure(error.details.error);
     }
     throw error;
   }
-  const sourceMetadata = toSourceMetadata({ path: validated.contextPath, ...loaded });
+  const sourceMetadata = loadedSources.map(toSourceMetadata);
+  const assembledContext = assembleSourceContext(loadedSources);
   const bridgePath = options.bridgePath ?? fileURLToPath(new URL("../.pi/extensions/lambda-rlm/bridge.py", import.meta.url));
   const runId = `lambda-rlm-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const leafModel = options.leafModel ?? process.env.LAMBDA_RLM_LEAF_MODEL ?? "google/gemini-3-flash-preview";
@@ -245,7 +304,8 @@ export async function executeLambdaRlmTool(
     bridge = await runSyntheticBridge({
       bridgePath,
       runId,
-      contextPath: loaded.resolvedPath,
+      contextPath: loadedSources.length === 1 ? loadedSources[0]!.resolvedPath : "<assembled-context>",
+      context: assembledContext,
       question: validated.question,
       modelCallRunner: (call) =>
         modelCallQueue.run(call, (queuedCall) =>
@@ -267,7 +327,7 @@ export async function executeLambdaRlmTool(
     if (error instanceof BridgeRunFailedError) {
       return formatRuntimeFailure({
         error: error.details.error,
-        source: sourceMetadata,
+        sources: sourceMetadata,
         question: validated.question,
         partialBridgeRun: {
           executionStarted: true,
@@ -300,7 +360,7 @@ export async function executeLambdaRlmTool(
     if (error instanceof BridgeProtocolError) {
       return formatRuntimeFailure({
         error: error.details.error,
-        source: sourceMetadata,
+        sources: sourceMetadata,
         question: validated.question,
         partialBridgeRun: {
           executionStarted: true,
@@ -338,7 +398,7 @@ export async function executeLambdaRlmTool(
 
   return formatSuccessResult({
     answer: bridge.content,
-    source: sourceMetadata,
+    sources: sourceMetadata,
     question: validated.question,
     modelCallSummary,
     bridgeRun: {

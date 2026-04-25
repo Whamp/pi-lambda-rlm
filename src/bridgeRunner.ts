@@ -6,7 +6,7 @@ import { ModelCallQueueCancelledError } from "./modelCallQueue.js";
 export type BridgeRunRequest = {
   type: "run_request";
   runId: string;
-  input: { contextPath: string; question: string };
+  input: { contextPath: string; question: string; context?: string };
   lambdaRlm?: { contextWindowChars?: number };
 };
 
@@ -110,6 +110,7 @@ export async function runSyntheticBridge(options: {
   runId: string;
   contextPath: string;
   question: string;
+  context?: string;
   modelCallRunner: ModelCallRunner;
   pythonPath?: string;
   bridgeArgs?: string[];
@@ -153,11 +154,21 @@ export async function runSyntheticBridge(options: {
   }
 
   const stdout = createInterface({ input: child.stdout });
+  let failBridge: (error: unknown) => void = () => undefined;
+  let writeBridgeMessage: (message: unknown, description: string) => Promise<void> = async () => undefined;
 
   const done = new Promise<CompletedSyntheticBridgeRun>((resolve, reject) => {
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
     });
+
+    function stdinRuntimeFailure(description: string, error?: unknown) {
+      const code = typeof (error as { code?: unknown } | undefined)?.code === "string" ? (error as { code: string }).code : undefined;
+      return runtimeFailure(
+        "bridge_stdin_write_failed",
+        `Failed to write ${description} to Python bridge stdin${code ? ` (${code})` : ""}.`,
+      );
+    }
 
     function fail(error: unknown) {
       if (!settled) {
@@ -168,6 +179,55 @@ export async function runSyntheticBridge(options: {
         reject(error);
       }
     }
+
+    failBridge = fail;
+    child.stdin.on("error", (error) => fail(stdinRuntimeFailure("NDJSON message", error)));
+    writeBridgeMessage = (message: unknown, description: string) =>
+      new Promise<void>((resolveWrite, rejectWrite) => {
+        if (settled) {
+          resolveWrite();
+          return;
+        }
+        if (!child.stdin.writable) {
+          rejectWrite(stdinRuntimeFailure(description));
+          return;
+        }
+        const payload = `${JSON.stringify(message)}\n`;
+        let doneWriting = false;
+        let waitingForDrain = false;
+        const cleanup = () => {
+          child.stdin.off("drain", onDrain);
+          child.stdin.off("error", onError);
+        };
+        const finish = (error?: unknown) => {
+          if (doneWriting) return;
+          doneWriting = true;
+          cleanup();
+          if (error) {
+            rejectWrite(stdinRuntimeFailure(description, error));
+          } else {
+            resolveWrite();
+          }
+        };
+        const onDrain = () => finish();
+        const onError = (error: Error) => finish(error);
+        child.stdin.once("error", onError);
+        try {
+          const accepted = child.stdin.write(payload, (error?: Error | null) => {
+            if (error) {
+              finish(error);
+              return;
+            }
+            if (!waitingForDrain) finish();
+          });
+          if (!accepted) {
+            waitingForDrain = true;
+            child.stdin.once("drain", onDrain);
+          }
+        } catch (error) {
+          finish(error);
+        }
+      });
 
     const onExternalAbort = () => fail(runtimeFailure("run_cancelled", "Lambda-RLM run was cancelled."));
     options.signal?.addEventListener("abort", onExternalAbort, { once: true });
@@ -252,8 +312,11 @@ export async function runSyntheticBridge(options: {
           .then((response) => {
             if (!settled && child.stdin.writable) {
               modelCallResponses.push(response);
-              child.stdin.write(JSON.stringify({ type: "model_callback_response", runId: options.runId, ...response }) + "\n");
-              pendingCallbackId = undefined;
+              void writeBridgeMessage({ type: "model_callback_response", runId: options.runId, ...response }, "model callback response")
+                .then(() => {
+                  pendingCallbackId = undefined;
+                })
+                .catch(fail);
             }
           })
           .catch((error: unknown) => {
@@ -279,8 +342,11 @@ export async function runSyntheticBridge(options: {
                       diagnostics: { stdout: "", stderr: "", exitCode: null },
                     };
               modelCallResponses.push(response);
-              child.stdin.write(JSON.stringify({ type: "model_callback_response", runId: options.runId, ...response }) + "\n");
-              pendingCallbackId = undefined;
+              void writeBridgeMessage({ type: "model_callback_response", runId: options.runId, ...response }, "model callback response")
+                .then(() => {
+                  pendingCallbackId = undefined;
+                })
+                .catch(fail);
             }
           });
         return;
@@ -355,10 +421,11 @@ export async function runSyntheticBridge(options: {
   const request: BridgeRunRequest = {
     type: "run_request",
     runId: options.runId,
-    input: { contextPath: options.contextPath, question: options.question },
+    input: { contextPath: options.contextPath, question: options.question, ...(options.context !== undefined ? { context: options.context } : {}) },
     ...(options.contextWindowChars !== undefined ? { lambdaRlm: { contextWindowChars: options.contextWindowChars } } : {}),
   };
-  child.stdin.write(JSON.stringify(request) + "\n");
+  const requestWrite = writeBridgeMessage(request, "run request").catch((error: unknown) => failBridge(error));
+  await Promise.race([requestWrite, done.then(() => undefined, () => undefined)]);
 
   return done;
 }

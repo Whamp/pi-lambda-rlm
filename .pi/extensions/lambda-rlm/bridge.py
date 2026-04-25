@@ -157,7 +157,8 @@ def bridge_request_to_prompt(request: dict[str, Any]) -> tuple[str, str, int]:
         raise ValueError("run_request input.contextPath must be a non-empty string.")
     if not isinstance(question, str) or not question:
         raise ValueError("run_request input.question must be a non-empty string.")
-    context = Path(context_path).read_text(encoding="utf-8")
+    inline_context = input_value.get("context")
+    context = inline_context if isinstance(inline_context, str) else Path(context_path).read_text(encoding="utf-8")
     prompt = f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
     lambda_rlm = request.get("lambdaRlm") if isinstance(request.get("lambdaRlm"), dict) else {}
     raw_context_window = lambda_rlm.get("contextWindowChars") if isinstance(lambda_rlm, dict) else None
