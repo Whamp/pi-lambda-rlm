@@ -1,41 +1,63 @@
 import { once } from "node:events";
 import { spawn } from "node:child_process";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { runSyntheticBridge, BridgeProtocolError } from "../src/bridgeRunner.js";
 
 const bridgePath = fileURLToPath(new URL("../.pi/extensions/lambda-rlm/bridge.py", import.meta.url));
-const successfulModelCallRunner = async (call: { requestId: string }) => ({
-  ok: true as const,
-  requestId: call.requestId,
-  content: "synthetic model answer",
-  diagnostics: { stdoutChars: "synthetic model answer".length, stderr: "", exitCode: 0 },
-});
+
+async function tempContextFile(content: string) {
+  const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-bridge-test-"));
+  const path = join(dir, "context.txt");
+  await writeFile(path, content, "utf8");
+  return path;
+}
+
+const successfulModelCallRunner = async (call: { requestId: string; prompt?: string }) => {
+  const prompt = call.prompt ?? "";
+  const content = prompt.includes("Single digit:") ? "2" : "real bridge model answer";
+  return {
+    ok: true as const,
+    requestId: call.requestId,
+    content,
+    diagnostics: { stdoutChars: content.length, stderr: "", exitCode: 0 },
+  };
+};
 
 describe("Python NDJSON bridge runner", () => {
-  it("starts the Python bridge, answers one request-identified synthetic model callback through a model call runner, and returns exactly one final result", async () => {
+  it("starts the Python bridge, answers request-identified real Lambda-RLM model callbacks through a model call runner, and returns exactly one final result", async () => {
+    const contextPath = await tempContextFile("small context for bridge test");
     const result = await runSyntheticBridge({
       bridgePath,
       runId: "run-test-1",
       question: "What is this file about?",
-      contextPath: "context.txt",
+      contextPath,
       modelCallRunner: successfulModelCallRunner,
     });
 
-    expect(result.content).toEqual("synthetic model answer");
+    expect(result.content).toEqual("real bridge model answer");
     expect(result.modelCallbacks).toEqual([
       {
         requestId: "model-call-1",
+        prompt: expect.stringContaining("Single digit:"),
+        metadata: expect.objectContaining({ phase: "task_detection", promptKey: "lambda_rlm.task_detection" }),
+      },
+      {
+        requestId: "model-call-2",
         prompt: expect.stringContaining("What is this file about?"),
-        metadata: { phase: "synthetic", promptKey: "synthetic.tracer" },
+        metadata: expect.objectContaining({ phase: "leaf", promptKey: "lambda_rlm.tasks.qa" }),
       },
     ]);
     expect(result.modelCallResponses).toEqual([
-      expect.objectContaining({ ok: true, requestId: "model-call-1", content: "synthetic model answer" }),
+      expect.objectContaining({ ok: true, requestId: "model-call-1", content: "2" }),
+      expect.objectContaining({ ok: true, requestId: "model-call-2", content: "real bridge model answer" }),
     ]);
     expect(result.finalResults).toHaveLength(1);
-    expect(result.stderr).toContain("bridge: received run request run-test-1");
-    expect(result.stdoutLines).toHaveLength(2);
+    expect(result.stderr).toContain("bridge: received real Lambda-RLM run request run-test-1");
+    expect(result.stdoutLines).toHaveLength(3);
   });
 
   it("sends a structured failure response when the model call runner fails", async () => {
@@ -44,7 +66,7 @@ describe("Python NDJSON bridge runner", () => {
         bridgePath,
         runId: "run-leaf-failure",
         question: "What?",
-        contextPath: "context.txt",
+        contextPath: await tempContextFile("failure context"),
         modelCallRunner: async (call) => ({
           ok: false,
           requestId: call.requestId,

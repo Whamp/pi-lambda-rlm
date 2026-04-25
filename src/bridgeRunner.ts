@@ -6,6 +6,7 @@ export type BridgeRunRequest = {
   type: "run_request";
   runId: string;
   input: { contextPath: string; question: string };
+  lambdaRlm?: { contextWindowChars?: number };
 };
 
 export type ModelCallbackRequest = {
@@ -26,6 +27,7 @@ export type BridgeRunResult = {
   ok: true;
   content: string;
   modelCalls: number;
+  metadata?: Record<string, unknown>;
 };
 
 export type BridgeFailedRunResult = {
@@ -111,6 +113,7 @@ export async function runSyntheticBridge(options: {
   pythonPath?: string;
   bridgeArgs?: string[];
   signal?: AbortSignal;
+  contextWindowChars?: number;
 }): Promise<CompletedSyntheticBridgeRun> {
   const pythonPath = options.pythonPath ?? "python3";
   const child = spawn(pythonPath, [options.bridgePath, ...(options.bridgeArgs ?? [])], {
@@ -243,6 +246,9 @@ export async function runSyntheticBridge(options: {
           ok: true,
           content: typed.content,
           modelCalls: typeof typed.modelCalls === "number" ? typed.modelCalls : callbacks.length,
+          ...(typeof typed.metadata === "object" && typed.metadata && !Array.isArray(typed.metadata)
+            ? { metadata: typed.metadata as Record<string, unknown> }
+            : {}),
         });
         child.stdin.end();
         return;
@@ -276,6 +282,7 @@ export async function runSyntheticBridge(options: {
     type: "run_request",
     runId: options.runId,
     input: { contextPath: options.contextPath, question: options.question },
+    ...(options.contextWindowChars !== undefined ? { lambdaRlm: { contextWindowChars: options.contextWindowChars } } : {}),
   };
   child.stdin.write(JSON.stringify(request) + "\n");
 

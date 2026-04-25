@@ -335,6 +335,16 @@ class LambdaRLM:
                     usage_summary=usage,
                     execution_time=time_end - time_start,
                     metadata={
+                        "plan": {
+                            "task_type": plan.task_type.value,
+                            "compose_op": plan.compose_op.value,
+                            "use_filter": plan.pipeline.use_filter,
+                            "k_star": plan.k_star,
+                            "tau_star": plan.tau_star,
+                            "depth": plan.depth,
+                            "cost_estimate": plan.cost_estimate,
+                            "n": plan.n,
+                        },
                         "patchBoundary": {
                             "package": "rlm",
                             "upstreamCommit": UPSTREAM_REFERENCE_COMMIT,

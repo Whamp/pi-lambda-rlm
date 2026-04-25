@@ -11,31 +11,48 @@ async function tempContextFile(content: string) {
   return path;
 }
 
-describe("synthetic bridge lambda_rlm tool execution", () => {
-  it("reads contextPath internally, services the synthetic bridge callback through a constrained leaf runner, and returns a bounded result without dumping source content", async () => {
-    const secretContent = "SECRET_SOURCE_CONTENT_SHOULD_NOT_BE_RETURNED\n".repeat(20);
+describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
+  it("reads contextPath internally, runs real Lambda-RLM through the Python bridge, services callbacks through a constrained leaf runner, and returns a bounded result without dumping source content", async () => {
+    const secretContent = [
+      "SECRET_SOURCE_CONTENT_SHOULD_NOT_BE_RETURNED",
+      "Ada Lovelace wrote notes about the Analytical Engine.",
+      "Grace Hopper worked on compilers and programming languages.",
+      "Katherine Johnson calculated trajectories for spaceflight.",
+      "The Analytical Engine notes described algorithms and computation.",
+    ].join(" ");
     const contextPath = await tempContextFile(secretContent);
     const processCalls: Array<{ args: string[]; prompt: string }> = [];
 
     const result = await executeLambdaRlmTool(
-      { contextPath, question: "What is this file about?" },
+      { contextPath, question: "Who wrote notes about the Analytical Engine?" },
       {
         leafModel: "google/gemini-test",
+        contextWindowChars: 80,
         leafProcessRunner: async (invocation) => {
           const promptFile = invocation.args.at(-1);
-          processCalls.push({
-            args: invocation.args,
-            prompt: promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "",
-          });
-          return { exitCode: 0, stdout: "synthetic model answer\n", stderr: "" };
+          const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
+          processCalls.push({ args: invocation.args, prompt });
+          if (prompt.includes("Single digit:") && prompt.includes("select the single most appropriate task type")) {
+            return { exitCode: 0, stdout: "2\n", stderr: "" };
+          }
+          if (prompt.includes("Does this excerpt contain information relevant")) {
+            return { exitCode: 0, stdout: "YES\n", stderr: "" };
+          }
+          if (prompt.includes("Using the following context, answer")) {
+            return { exitCode: 0, stdout: "Partial answer: Ada Lovelace wrote notes about the Analytical Engine.\n", stderr: "" };
+          }
+          if (prompt.includes("Synthesise these partial answers")) {
+            return { exitCode: 0, stdout: "Ada Lovelace wrote notes about the Analytical Engine.\n", stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: `unexpected prompt: ${prompt.slice(0, 120)}` };
         },
       },
     );
 
     expect(result.content[0]).toMatchObject({ type: "text" });
     const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-    expect(text).toContain("Synthetic λ-RLM bridge answer");
-    expect(text).toContain("synthetic model answer");
+    expect(text).toContain("Ada Lovelace wrote notes about the Analytical Engine.");
+    expect(text).toContain("Real Lambda-RLM completed");
     expect(text.length).toBeLessThanOrEqual(4096);
     expect(text).not.toContain("SECRET_SOURCE_CONTENT_SHOULD_NOT_BE_RETURNED");
     expect(JSON.stringify(result.details)).not.toContain("SECRET_SOURCE_CONTENT_SHOULD_NOT_BE_RETURNED");
@@ -45,31 +62,26 @@ describe("synthetic bridge lambda_rlm tool execution", () => {
         source: "file",
         contextPath,
         contextChars: secretContent.length,
-        questionChars: "What is this file about?".length,
+        questionChars: "Who wrote notes about the Analytical Engine?".length,
       },
       bridgeRun: {
         executionStarted: true,
         pythonBridge: true,
         protocol: "strict-stdout-stdin-ndjson",
-        stdoutProtocolLines: 2,
-        finalResults: 1,
-        realLambdaRlm: false,
-        childPiLeafCalls: 1,
+        realLambdaRlm: true,
+        childPiLeafCalls: processCalls.length,
         leafProfile: "formal_pi_print",
         leafModel: "google/gemini-test",
-      },
-      fakeRun: {
-        engine: "synthetic-python-ndjson-bridge",
-        executionStarted: true,
-        childPiLeafCalls: 1,
       },
       output: {
         bounded: true,
         truncated: false,
       },
     });
-    expect(processCalls).toHaveLength(1);
-    expect(processCalls[0]?.prompt).toContain("What is this file about?");
+    expect(result.details).not.toHaveProperty("fakeRun");
+    expect(processCalls.length).toBeGreaterThan(1);
+    expect(processCalls.some((call) => call.prompt.includes("Single digit:"))).toBe(true);
+    expect(processCalls.some((call) => call.prompt.includes("Using the following context, answer"))).toBe(true);
     expect(processCalls[0]?.args).toEqual(
       expect.arrayContaining(["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates"]),
     );

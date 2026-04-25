@@ -30,10 +30,15 @@ describe("lambda_rlm Pi extension registration", () => {
 
     const result = await tool.execute("call-1", { contextPath: "CONTEXT.md", question: "What is this project about?" }, undefined, undefined, {
       cwd: process.cwd(),
-      leafProcessRunner: async () => ({ exitCode: 0, stdout: "synthetic model answer\n", stderr: "" }),
+      leafProcessRunner: async (invocation: any) => {
+        const promptFile = invocation.args.at(-1);
+        const prompt = promptFile?.startsWith("@") ? await import("node:fs/promises").then((fs) => fs.readFile(promptFile.slice(1), "utf8")) : "";
+        return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : "synthetic model answer\n", stderr: "" };
+      },
     });
 
-    expect(result.content[0].text).toContain("Synthetic λ-RLM bridge answer");
+    expect(result.content[0].text).toContain("Real Lambda-RLM completed");
+    expect(result.content[0].text).toContain("synthetic model answer");
     expect(result.details.ok).toBe(true);
     expect(JSON.stringify(result.details)).not.toContain("Path-Based Context Ingestion");
   });
