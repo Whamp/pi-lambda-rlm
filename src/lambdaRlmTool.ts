@@ -1,5 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { runSyntheticBridge } from "./bridgeRunner.js";
 
 const ALLOWED_KEYS = new Set(["contextPath", "question"]);
 const VISIBLE_OUTPUT_LIMIT = 4096;
@@ -99,18 +101,32 @@ function countLines(text: string) {
   return text.split("\n").length;
 }
 
-export async function executeLambdaRlmTool(params: unknown, options: { cwd?: string } = {}): Promise<LambdaRlmToolResult> {
+export async function executeLambdaRlmTool(
+  params: unknown,
+  options: { cwd?: string; bridgePath?: string; signal?: AbortSignal } = {},
+): Promise<LambdaRlmToolResult> {
   const validated = validateLambdaRlmParams(params);
   const cwd = options.cwd ?? process.cwd();
   const loaded = await loadContextFile(validated.contextPath, cwd);
+  const bridgePath = options.bridgePath ?? fileURLToPath(new URL("../.pi/extensions/lambda-rlm/bridge.py", import.meta.url));
+  const runId = `lambda-rlm-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  const bridge = await runSyntheticBridge({
+    bridgePath,
+    runId,
+    contextPath: loaded.resolvedPath,
+    question: validated.question,
+    fakeModelResponse: `Synthetic model response for: ${validated.question}`,
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
 
   const rawAnswer = [
-    "Fake λ-RLM answer",
+    "Synthetic λ-RLM bridge answer",
     "",
-    `Question: ${validated.question}`,
+    bridge.content,
     "",
-    `I read the referenced file internally (${loaded.content.length} characters, ${countLines(loaded.content)} lines) and would run Lambda-RLM here in a later slice.`,
-    "This fake slice intentionally returns metadata only and does not expose source contents, raw prompts, Python bridge calls, or child Pi leaf calls.",
+    `The extension read the referenced file internally (${loaded.content.length} characters, ${countLines(loaded.content)} lines), started the Python NDJSON bridge, serviced one synthetic model callback, and received one final run result.`,
+    "This tracer bullet does not run real Lambda-RLM or real child Pi leaf calls.",
   ].join("\n");
   const answer = boundedText(rawAnswer);
 
@@ -127,10 +143,26 @@ export async function executeLambdaRlmTool(params: unknown, options: { cwd?: str
         contextLines: countLines(loaded.content),
         questionChars: validated.question.length,
       },
-      fakeRun: {
-        engine: "fake-single-file-lambda-rlm",
+      bridgeRun: {
         executionStarted: true,
-        pythonBridge: false,
+        pythonBridge: true,
+        protocol: "strict-stdout-stdin-ndjson",
+        runId,
+        stdoutProtocolLines: bridge.stdoutLines.length,
+        stderrDiagnosticsChars: bridge.stderr.length,
+        modelCallbacks: bridge.modelCallbacks.map((callback) => ({
+          requestId: callback.requestId,
+          metadata: callback.metadata,
+          promptChars: callback.prompt.length,
+        })),
+        finalResults: bridge.finalResults.length,
+        realLambdaRlm: false,
+        childPiLeafCalls: 0,
+      },
+      fakeRun: {
+        engine: "synthetic-python-ndjson-bridge",
+        executionStarted: true,
+        pythonBridge: true,
         realLambdaRlm: false,
         childPiLeafCalls: 0,
       },
@@ -140,7 +172,7 @@ export async function executeLambdaRlmTool(params: unknown, options: { cwd?: str
         truncated: answer.truncated,
         maxVisibleChars: VISIBLE_OUTPUT_LIMIT,
       },
-      warnings: ["Fake implementation for schema and context-budget validation only."],
+      warnings: ["Synthetic bridge tracer bullet only; real Lambda-RLM and child Pi calls are intentionally out of scope."],
     },
   };
 }

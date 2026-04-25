@@ -32,7 +32,7 @@ describe("lambda_rlm Pi extension registration", () => {
       cwd: process.cwd(),
     });
 
-    expect(result.content[0].text).toContain("Fake λ-RLM answer");
+    expect(result.content[0].text).toContain("Synthetic λ-RLM bridge answer");
     expect(result.details.ok).toBe(true);
     expect(JSON.stringify(result.details)).not.toContain("Path-Based Context Ingestion");
   });
