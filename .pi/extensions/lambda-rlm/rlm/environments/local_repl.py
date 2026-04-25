@@ -238,7 +238,7 @@ class LocalREPL(NonIsolatedEnv):
             return "No variables created yet. Use ```repl``` blocks to create variables."
         return f"Available variables: {available}"
 
-    def _llm_query(self, prompt: str, model: str | None = None) -> str:
+    def _llm_query(self, prompt: str, model: str | None = None, metadata: dict[str, Any] | None = None) -> str:
         """Query the LM with a single plain completion (no REPL, no recursion).
 
         This always makes a direct LM call via the handler, regardless of depth.
@@ -246,12 +246,13 @@ class LocalREPL(NonIsolatedEnv):
         Args:
             prompt: The prompt to send to the LM.
             model: Optional model name to use (if handler has multiple clients).
+            metadata: Optional out-of-band model-call metadata.
         """
         if not self.lm_handler_address:
             return "Error: No LM handler configured"
 
         try:
-            request = LMRequest(prompt=prompt, model=model, depth=self.depth)
+            request = LMRequest(prompt=prompt, model=model, metadata=metadata, depth=self.depth)
             response = send_lm_request(self.lm_handler_address, request)
 
             if not response.success:

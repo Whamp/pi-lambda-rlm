@@ -8,7 +8,9 @@ The vendored upstream package is MIT licensed. Keep the upstream license notice
 at `LICENSE` in this directory when updating, pruning, or replacing the vendored
 boundary.
 
-Intentional local patches for issue #5:
+Intentional local patches:
+
+## Issue #5: injected BaseLM client seam
 
 1. `rlm.lambda_rlm.LambdaRLM.__init__(..., client: BaseLM | None = None)` stores
    an optional injected client.
@@ -18,7 +20,19 @@ Intentional local patches for issue #5:
 3. `rlm.clients.__init__` tolerates missing `python-dotenv` at import time. Provider
    clients remain lazily imported by `get_client`, preserving default behavior when
    provider dependencies and credentials are installed.
-4. `LambdaRLM.completion()` includes metadata documenting this patch boundary.
+
+## Issue #12: explicit model-call metadata seam
+
+1. `LMRequest` serialization/deserialization carries optional `metadata` across
+   the LocalREPL -> LMHandler socket boundary.
+2. `LocalREPL._llm_query(..., metadata=...)` forwards out-of-band model-call
+   metadata without altering prompt text.
+3. `LMHandler` calls `client.completion_with_metadata(prompt, metadata)` when a
+   client opts in, and falls back to `client.completion(prompt)` for default clients.
+4. `LambdaRLM` task detection, filter, leaf, and LLM-backed reducer call sites
+   attach primitive metadata fields such as `source`, `phase`, `combinator`,
+   `promptKey`, `taskType`, and `composeOp`.
+5. `LambdaRLM.completion()` includes metadata documenting this patch boundary.
 
 Do not replace the real `LocalREPL`/`LMHandler` Lambda-RLM execution path with a
 simplified direct recursive executor. Tests under `tests/python/` assert that

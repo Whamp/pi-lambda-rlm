@@ -68,20 +68,6 @@ def normalize_prompt(prompt: str | dict[str, Any]) -> str:
     return json.dumps(prompt, ensure_ascii=False, sort_keys=True)
 
 
-def prompt_metadata(prompt: str) -> dict[str, Any]:
-    if "Single digit:" in prompt and "select the single most appropriate task type" in prompt:
-        return {"phase": "task_detection", "promptKey": "lambda_rlm.task_detection"}
-    if "Does this excerpt contain information relevant" in prompt:
-        return {"phase": "filter", "promptKey": "lambda_rlm.filter.relevance"}
-    if "Using the following context, answer" in prompt:
-        return {"phase": "leaf", "promptKey": "lambda_rlm.tasks.qa"}
-    if "Synthesise these partial answers" in prompt:
-        return {"phase": "reducer", "promptKey": "lambda_rlm.reducers.select_relevant"}
-    if "Merge these partial summaries" in prompt:
-        return {"phase": "reducer", "promptKey": "lambda_rlm.reducers.merge_summaries"}
-    return {"phase": "model_call", "promptKey": "lambda_rlm.unknown"}
-
-
 class CallbackBaseLM(BaseLM):
     def __init__(self, run_id: str):
         super().__init__(model_name="pi-extension-callback")
@@ -90,16 +76,24 @@ class CallbackBaseLM(BaseLM):
         self.last_usage = ModelUsageSummary(total_calls=0, total_input_tokens=0, total_output_tokens=0, total_cost=None)
 
     def completion(self, prompt: str | dict[str, Any]) -> str:
+        return self.completion_with_metadata(prompt, {})
+
+    def completion_with_metadata(self, prompt: str | dict[str, Any], metadata: dict[str, Any] | None) -> str:
         prompt_text = normalize_prompt(prompt)
         self.call_count += 1
         request_id = f"model-call-{self.call_count}"
+        callback_metadata = dict(metadata or {})
+        callback_metadata.setdefault("source", "lambda_rlm")
+        callback_metadata.setdefault("phase", "model_call")
+        callback_metadata.setdefault("combinator", "unknown")
+        callback_metadata["promptChars"] = len(prompt_text)
         emit_stdout(
             {
                 "type": "model_callback_request",
                 "runId": self.run_id,
                 "requestId": request_id,
                 "prompt": prompt_text,
-                "metadata": {**prompt_metadata(prompt_text), "promptChars": len(prompt_text)},
+                "metadata": callback_metadata,
             }
         )
         response = read_json_line(self.run_id)

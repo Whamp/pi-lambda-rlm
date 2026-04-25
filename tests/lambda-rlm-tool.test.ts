@@ -115,6 +115,24 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
       },
     });
     expect(result.details).not.toHaveProperty("fakeRun");
+    const bridgeRunDetails = result.details.bridgeRun as { modelCallbacks: Array<Record<string, unknown>>; modelCallResponses: Array<Record<string, unknown>> };
+    expect(bridgeRunDetails.modelCallbacks[0]).toEqual(
+      expect.objectContaining({
+        requestId: "model-call-1",
+        metadata: expect.objectContaining({ source: "lambda_rlm", phase: "task_detection", combinator: "classifier" }),
+        promptChars: expect.any(Number),
+      }),
+    );
+    expect(bridgeRunDetails.modelCallbacks[0]).not.toHaveProperty("prompt");
+    expect(bridgeRunDetails.modelCallResponses[0]).toEqual(
+      expect.objectContaining({
+        requestId: "model-call-1",
+        status: "succeeded",
+        metadata: expect.objectContaining({ source: "lambda_rlm", phase: "task_detection", combinator: "classifier" }),
+        stdoutChars: expect.any(Number),
+      }),
+    );
+    expect(JSON.stringify(result.details)).not.toContain("Single digit:");
     expect(processCalls.length).toBeGreaterThan(1);
     expect(processCalls.some((call) => call.prompt.includes("Single digit:"))).toBe(true);
     expect(processCalls.some((call) => call.prompt.includes("Using the following context, answer"))).toBe(true);

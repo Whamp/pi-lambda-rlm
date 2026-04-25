@@ -51,12 +51,12 @@ describe("Python NDJSON bridge runner", () => {
       {
         requestId: "model-call-1",
         prompt: expect.stringContaining("Single digit:"),
-        metadata: expect.objectContaining({ phase: "task_detection", promptKey: "lambda_rlm.task_detection" }),
+        metadata: expect.objectContaining({ source: "lambda_rlm", phase: "task_detection", combinator: "classifier", promptKey: "TASK-DETECTION-PROMPT.md" }),
       },
       {
         requestId: "model-call-2",
         prompt: expect.stringContaining("What is this file about?"),
-        metadata: expect.objectContaining({ phase: "leaf", promptKey: "lambda_rlm.tasks.qa" }),
+        metadata: expect.objectContaining({ source: "lambda_rlm", phase: "execute_phi", combinator: "leaf", promptKey: "tasks/qa.md" }),
       },
     ]);
     expect(result.modelCallResponses).toEqual([
@@ -66,6 +66,27 @@ describe("Python NDJSON bridge runner", () => {
     expect(result.finalResults).toHaveLength(1);
     expect(result.stderr).toContain("bridge: received real Lambda-RLM run request run-test-1");
     expect(result.stdoutLines).toHaveLength(3);
+  });
+
+  it("rejects model callback requests that omit explicit metadata", async () => {
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import json
+request = json.loads(input())
+print(json.dumps({"type":"model_callback_request","runId":request["runId"],"requestId":"model-call-1","prompt":"ordinary overridden prompt without metadata"}), flush=True)
+`);
+
+    await expect(
+      runSyntheticBridge({
+        bridgePath,
+        runId: "run-missing-metadata",
+        question: "What?",
+        contextPath: "context.txt",
+        modelCallRunner: successfulModelCallRunner,
+      }),
+    ).rejects.toMatchObject({
+      name: "BridgeProtocolError",
+      details: { error: { code: "invalid_model_callback_request" } },
+    });
   });
 
   it("sends a structured failure response when the model call runner fails", async () => {

@@ -78,7 +78,92 @@ class DeterministicFakeBaseLM(BaseLM):
         return "unknown"
 
 
+class MetadataAwareFakeBaseLM(BaseLM):
+    def __init__(self):
+        super().__init__(model_name="metadata-aware-fake")
+        self.calls = []
+
+    def completion(self, prompt):
+        raise AssertionError("metadata-aware fake must be called via completion_with_metadata")
+
+    def completion_with_metadata(self, prompt, metadata):
+        prompt_text = str(prompt)
+        self.calls.append(
+            {
+                "prompt": prompt_text,
+                "metadata": dict(metadata),
+                "thread": threading.current_thread().name,
+            }
+        )
+        combinator = metadata.get("combinator")
+        if combinator == "classifier":
+            return "2"
+        if combinator == "filter":
+            return "YES"
+        if combinator == "leaf":
+            return "Partial answer from explicit leaf metadata."
+        if combinator == "reduce":
+            return "Final answer from explicit reducer metadata."
+        raise AssertionError(f"unexpected metadata: {metadata!r}")
+
+    async def acompletion(self, prompt):
+        return self.completion(prompt)
+
+    def get_usage_summary(self):
+        return UsageSummary(
+            model_usage_summaries={
+                self.model_name: ModelUsageSummary(
+                    total_calls=len(self.calls),
+                    total_input_tokens=0,
+                    total_output_tokens=0,
+                    total_cost=None,
+                )
+            }
+        )
+
+    def get_last_usage(self):
+        return ModelUsageSummary(
+            total_calls=1,
+            total_input_tokens=0,
+            total_output_tokens=0,
+            total_cost=None,
+        )
+
+
 class LambdaRLMInjectedClientTests(unittest.TestCase):
+    def test_explicit_metadata_crosses_task_leaf_filter_and_reducer_without_prompt_text_inference(self):
+        fake = MetadataAwareFakeBaseLM()
+        context = " ".join([f"chunk {i} Ada Lovelace Analytical Engine metadata path." for i in range(20)])
+        prompt = f"Context:\n{context}\n\nQuestion: Who is mentioned?\n\nAnswer:"
+
+        with mock.patch.object(lambda_rlm_module, "_TASK_DETECTION_PROMPT", "OVERRIDDEN TASK DETECTION {metadata}"), \
+             mock.patch.dict(lambda_rlm_module.TASK_TEMPLATES, {lambda_rlm_module.TaskType.QA: "OVERRIDDEN LEAF PROMPT query={query} text={text}"}), \
+             mock.patch.object(lambda_rlm_module, "FILTER_RELEVANCE_TEMPLATE", "OVERRIDDEN FILTER query={query} preview={preview}"), \
+             mock.patch.object(lambda_rlm_module, "SELECT_RELEVANT_REDUCER_TEMPLATE", "OVERRIDDEN REDUCER query={query} parts={parts}"):
+            result = LambdaRLM(client=fake, context_window_chars=80).completion(prompt)
+
+        self.assertEqual(result.response, "Final answer from explicit reducer metadata.")
+        by_combinator = {call["metadata"]["combinator"] for call in fake.calls}
+        self.assertGreaterEqual({"classifier", "filter", "leaf", "reduce"}, by_combinator)
+
+        main_thread = threading.current_thread().name
+        crossed_socket = {call["metadata"]["combinator"] for call in fake.calls if call["thread"] != main_thread}
+        self.assertGreaterEqual({"filter", "leaf", "reduce"}, crossed_socket)
+
+        for call in fake.calls:
+            metadata = call["metadata"]
+            self.assertEqual(metadata["source"], "lambda_rlm")
+            self.assertIn("phase", metadata)
+            self.assertIn("combinator", metadata)
+            self.assertNotIn("source", call["prompt"])
+            self.assertNotIn("combinator", call["prompt"])
+
+        prompt_keys = {call["metadata"].get("promptKey") for call in fake.calls}
+        self.assertIn("TASK-DETECTION-PROMPT.md", prompt_keys)
+        self.assertIn("tasks/qa.md", prompt_keys)
+        self.assertIn("filters/relevance.md", prompt_keys)
+        self.assertIn("reducers/select_relevant.md", prompt_keys)
+
     def test_injected_base_lm_runs_upstream_local_repl_lmhandler_qa_filter_leaf_and_reduce(self):
         fake = DeterministicFakeBaseLM()
         context = " ".join(
@@ -108,7 +193,7 @@ class LambdaRLMInjectedClientTests(unittest.TestCase):
         }
         self.assertGreaterEqual({"filter", "leaf", "reducer"}, lmhandler_categories)
         self.assertEqual(result.metadata["patchBoundary"]["upstreamCommit"], UPSTREAM_COMMIT)
-        self.assertEqual(result.metadata["patchBoundary"]["localPatch"], "optional BaseLM client injection")
+        self.assertEqual(result.metadata["patchBoundary"]["localPatch"], "optional BaseLM client injection and explicit model-call metadata")
 
     def test_default_client_path_delegates_to_upstream_factory_when_client_is_omitted(self):
         fake = DeterministicFakeBaseLM()

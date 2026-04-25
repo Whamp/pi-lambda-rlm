@@ -130,6 +130,24 @@ TASK_TEMPLATES: dict[TaskType, str] = {
     TaskType.GENERAL:        "Process the following and provide a response:\n\n{text}",
 }
 
+FILTER_RELEVANCE_TEMPLATE = (
+    "Question: {query}\n\n"
+    "Does this excerpt contain information relevant to answering the question?\n"
+    "Reply YES or NO only.\n\nExcerpt:\n{preview}"
+)
+MERGE_SUMMARIES_REDUCER_TEMPLATE = (
+    "Merge these partial summaries into one concise, coherent summary. "
+    "Preserve all key facts and findings:\n\n{parts}"
+)
+SELECT_RELEVANT_REDUCER_TEMPLATE = (
+    "Question: {query}\n\n"
+    "Synthesise these partial answers into one complete, accurate answer:\n\n{parts}"
+)
+COMBINE_ANALYSIS_REDUCER_TEMPLATE = (
+    "Combine these partial analyses into one comprehensive, "
+    "well-structured analysis:\n\n{parts}"
+)
+
 
 # ─── Task detection prompt (Phase 2) ──────────────────────────────────────────
 # This is the single menu-selection LLM call (not code generation).
@@ -232,6 +250,35 @@ class LambdaRLM:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def _model_call_metadata(
+        self,
+        *,
+        phase: str,
+        combinator: str,
+        prompt_key: str | None = None,
+        task_type: TaskType | None = None,
+        compose_op: ComposeOp | None = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "source": "lambda_rlm",
+            "phase": phase,
+            "combinator": combinator,
+        }
+        if prompt_key is not None:
+            metadata["promptKey"] = prompt_key
+        if task_type is not None:
+            metadata["taskType"] = task_type.value
+        if compose_op is not None:
+            metadata["composeOp"] = compose_op.value
+        metadata.update({key: value for key, value in extra.items() if value is not None})
+        return metadata
+
+    def _completion_with_metadata(self, client: BaseLM, prompt: str, metadata: dict[str, Any]) -> str:
+        if hasattr(client, "completion_with_metadata"):
+            return client.completion_with_metadata(prompt, metadata)
+        return client.completion(prompt)
+
     def completion(self, prompt: str) -> RLMChatCompletion:
         """
         Run λ-RLM on prompt. Returns RLMChatCompletion (drop-in for RLM.completion).
@@ -295,8 +342,17 @@ class LambdaRLM:
                     f"query={repr(effective_query[:100])}, "
                     f"preview={repr(peek_text[:150])}"
                 )
-                raw = client.completion(
-                    _TASK_DETECTION_PROMPT.format(metadata=metadata)
+                raw = self._completion_with_metadata(
+                    client,
+                    _TASK_DETECTION_PROMPT.format(metadata=metadata),
+                    self._model_call_metadata(
+                        phase="task_detection",
+                        combinator="classifier",
+                        prompt_key="TASK-DETECTION-PROMPT.md",
+                        promptChars=len(_TASK_DETECTION_PROMPT.format(metadata=metadata)),
+                        contextChars=n,
+                        previewChars=len(peek_text[:150]),
+                    ),
                 ).strip()
                 task_type = self._parse_task_type(raw)
 
@@ -348,7 +404,7 @@ class LambdaRLM:
                         "patchBoundary": {
                             "package": "rlm",
                             "upstreamCommit": UPSTREAM_REFERENCE_COMMIT,
-                            "localPatch": "optional BaseLM client injection",
+                            "localPatch": "optional BaseLM client injection and explicit model-call metadata",
                         },
                     },
                 )
@@ -489,6 +545,7 @@ class LambdaRLM:
         # _llm_query sends a socket request to LMHandler → single LLM call.
         _llm = repl._llm_query
         compose_op = plan.compose_op
+        metadata_for = self._model_call_metadata
 
         if compose_op == ComposeOp.CONCATENATE:
             def _reduce(parts: list[str]) -> str:
@@ -499,9 +556,18 @@ class LambdaRLM:
                 if len(parts) == 1:
                     return parts[0]
                 merged = "\n\n---\n\n".join(parts)
+                prompt = MERGE_SUMMARIES_REDUCER_TEMPLATE.format(parts=merged)
                 return _llm(
-                    "Merge these partial summaries into one concise, coherent summary. "
-                    "Preserve all key facts and findings:\n\n" + merged
+                    prompt,
+                    metadata=metadata_for(
+                        phase="execute_phi",
+                        combinator="reduce",
+                        prompt_key="reducers/merge_summaries.md",
+                        task_type=plan.task_type,
+                        compose_op=compose_op,
+                        partCount=len(parts),
+                        promptChars=len(prompt),
+                    ),
                 )
 
         elif compose_op == ComposeOp.SELECT_RELEVANT:
@@ -516,10 +582,18 @@ class LambdaRLM:
                 if len(candidates) == 1:
                     return candidates[0]
                 merged = "\n\n---\n\n".join(candidates)
+                prompt = SELECT_RELEVANT_REDUCER_TEMPLATE.format(query=query, parts=merged)
                 return _llm(
-                    f"Question: {query}\n\n"
-                    "Synthesise these partial answers into one complete, accurate answer:\n\n"
-                    + merged
+                    prompt,
+                    metadata=metadata_for(
+                        phase="execute_phi",
+                        combinator="reduce",
+                        prompt_key="reducers/select_relevant.md",
+                        task_type=plan.task_type,
+                        compose_op=compose_op,
+                        partCount=len(candidates),
+                        promptChars=len(prompt),
+                    ),
                 )
 
         elif compose_op == ComposeOp.MAJORITY_VOTE:
@@ -550,9 +624,18 @@ class LambdaRLM:
                 if len(parts) == 1:
                     return parts[0]
                 merged = "\n\n---\n\n".join(parts)
+                prompt = COMBINE_ANALYSIS_REDUCER_TEMPLATE.format(parts=merged)
                 return _llm(
-                    "Combine these partial analyses into one comprehensive, "
-                    "well-structured analysis:\n\n" + merged
+                    prompt,
+                    metadata=metadata_for(
+                        phase="execute_phi",
+                        combinator="reduce",
+                        prompt_key="reducers/combine_analysis.md",
+                        task_type=plan.task_type,
+                        compose_op=compose_op,
+                        partCount=len(parts),
+                        promptChars=len(prompt),
+                    ),
                 )
 
         else:
@@ -565,10 +648,19 @@ class LambdaRLM:
         def _filter_relevant(query_text: str, items: list[tuple[str, str]]) -> list[str]:
             kept: list[str] = []
             for chunk, preview in items:
+                prompt = FILTER_RELEVANCE_TEMPLATE.format(query=query_text, preview=preview)
                 resp = _llm(
-                    f"Question: {query_text}\n\n"
-                    "Does this excerpt contain information relevant to answering the question?\n"
-                    "Reply YES or NO only.\n\nExcerpt:\n" + preview
+                    prompt,
+                    metadata=metadata_for(
+                        phase="execute_phi",
+                        combinator="filter",
+                        prompt_key="filters/relevance.md",
+                        task_type=plan.task_type,
+                        compose_op=compose_op,
+                        chunkChars=len(chunk),
+                        previewChars=len(preview),
+                        promptChars=len(prompt),
+                    ),
                 ).strip().upper()
                 if resp.startswith("Y"):
                     kept.append(chunk)
@@ -610,16 +702,25 @@ class LambdaRLM:
         template = TASK_TEMPLATES[plan.task_type]
 
         # Leaf call: sub_M(Template[τ_type].Fmt(P)) — the ONLY neural call in Φ.
+        leaf_metadata = self._model_call_metadata(
+            phase="execute_phi",
+            combinator="leaf",
+            prompt_key=f"tasks/{plan.task_type.value}.md",
+            task_type=plan.task_type,
+            compose_op=plan.compose_op,
+        )
         if plan.task_type == TaskType.QA and query:
-            leaf_expr = (
-                f"llm_query({repr(template)}.format(text=P, query={repr(query)}))"
-            )
+            leaf_prompt_expr = f"{repr(template)}.format(text=P, query={repr(query)})"
         elif plan.task_type == TaskType.QA:
             # No query available — use a generic QA prompt without {query} placeholder.
             fallback_tpl = "Answer based on the following context:\n\n{text}"
-            leaf_expr = f"llm_query({repr(fallback_tpl)}.format(text=P))"
+            leaf_prompt_expr = f"{repr(fallback_tpl)}.format(text=P)"
         else:
-            leaf_expr = f"llm_query({repr(template)}.format(text=P))"
+            leaf_prompt_expr = f"{repr(template)}.format(text=P)"
+        leaf_expr = (
+            f"llm_query(_leaf_prompt := {leaf_prompt_expr}, "
+            f"metadata={{**{repr(leaf_metadata)}, 'chunkChars': len(P), 'promptChars': len(_leaf_prompt)}})"
+        )
 
         # Split + optional filter (inside the else branch of _Phi).
         # Indented 8 spaces = inside `else:` block of `def _Phi(P):`.
