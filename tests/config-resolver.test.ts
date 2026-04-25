@@ -33,8 +33,8 @@ describe("TOML run config resolver", () => {
 
   it("applies sparse global and project overlays with project-over-global precedence", async () => {
     const dirs = await tempConfigDirs();
-    await writeToml(dirs.globalConfigPath, "[run]\nmax_input_bytes = 1000\noutput_max_bytes = 200\n");
-    await writeToml(dirs.projectConfigPath, "[run]\noutput_max_lines = 5\noutput_max_bytes = 120\n");
+    await writeToml(dirs.globalConfigPath, "[run]\nmax_input_bytes = 1000\noutput_max_bytes = 200\nmax_model_calls = 8\nwhole_run_timeout_ms = 5000\n");
+    await writeToml(dirs.projectConfigPath, "[run]\noutput_max_lines = 5\noutput_max_bytes = 120\nmodel_call_timeout_ms = 900\n");
 
     await expect(resolveRunConfig({ cwd: dirs.project, homeDir: dirs.home })).resolves.toEqual({
       ok: true,
@@ -42,21 +42,28 @@ describe("TOML run config resolver", () => {
         maxInputBytes: 1000,
         outputMaxBytes: 120,
         outputMaxLines: 5,
+        maxModelCalls: 8,
+        wholeRunTimeoutMs: 5000,
+        modelCallTimeoutMs: 900,
       },
     });
   });
 
   it("allows per-run options to tighten but not loosen resolved limits", async () => {
     const dirs = await tempConfigDirs();
-    await writeToml(dirs.globalConfigPath, "[run]\nmax_input_bytes = 1000\noutput_max_bytes = 200\noutput_max_lines = 10\n");
+    await writeToml(dirs.globalConfigPath, "[run]\nmax_input_bytes = 1000\noutput_max_bytes = 200\noutput_max_lines = 10\nmax_model_calls = 4\nwhole_run_timeout_ms = 1000\nmodel_call_timeout_ms = 500\n");
 
     await expect(
-      resolveRunConfig({ cwd: dirs.project, homeDir: dirs.home, perRun: { maxInputBytes: 900, outputMaxBytes: 199, outputMaxLines: 10 } }),
-    ).resolves.toEqual({ ok: true, config: { maxInputBytes: 900, outputMaxBytes: 199, outputMaxLines: 10 } });
+      resolveRunConfig({ cwd: dirs.project, homeDir: dirs.home, perRun: { maxInputBytes: 900, outputMaxBytes: 199, outputMaxLines: 10, maxModelCalls: 3, wholeRunTimeoutMs: 900, modelCallTimeoutMs: 500 } }),
+    ).resolves.toEqual({ ok: true, config: { maxInputBytes: 900, outputMaxBytes: 199, outputMaxLines: 10, maxModelCalls: 3, wholeRunTimeoutMs: 900, modelCallTimeoutMs: 500 } });
 
     await expect(resolveRunConfig({ cwd: dirs.project, homeDir: dirs.home, perRun: { outputMaxBytes: 201 } })).resolves.toMatchObject({
       ok: false,
       error: { code: "per_run_limit_loosened", field: "outputMaxBytes" },
+    });
+    await expect(resolveRunConfig({ cwd: dirs.project, homeDir: dirs.home, perRun: { maxModelCalls: 5 } })).resolves.toMatchObject({
+      ok: false,
+      error: { code: "per_run_limit_loosened", field: "maxModelCalls" },
     });
   });
 

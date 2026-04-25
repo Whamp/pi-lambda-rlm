@@ -114,11 +114,12 @@ export async function runSyntheticBridge(options: {
   bridgeArgs?: string[];
   signal?: AbortSignal;
   contextWindowChars?: number;
+  maxModelCalls?: number;
+  wholeRunTimeoutMs?: number;
 }): Promise<CompletedSyntheticBridgeRun> {
   const pythonPath = options.pythonPath ?? "python3";
   const child = spawn(pythonPath, [options.bridgePath, ...(options.bridgeArgs ?? [])], {
     stdio: ["pipe", "pipe", "pipe"],
-    signal: options.signal,
   });
 
   const stdoutLines: string[] = [];
@@ -128,9 +129,26 @@ export async function runSyntheticBridge(options: {
   const finalResults: BridgeRunResult[] = [];
   let pendingCallbackId: string | undefined;
   let settled = false;
+  let startedModelCalls = 0;
+  const runAbortController = new AbortController();
+  let wholeRunTimeout: NodeJS.Timeout | undefined;
 
   function protocolError(code: string, message: string, line?: string): BridgeProtocolError {
     return new BridgeProtocolError(code, message, { stderr, stdoutLines, ...(line ? { line } : {}) });
+  }
+
+  function runtimeFailure(code: string, message: string): BridgeRunFailedError {
+    return new BridgeRunFailedError(
+      {
+        type: "run_result",
+        runId: options.runId,
+        ok: false,
+        error: { type: "runtime_control", code, message },
+        modelCalls: startedModelCalls,
+      },
+      { stderr, stdoutLines },
+      modelCallResponses,
+    );
   }
 
   const stdout = createInterface({ input: child.stdout });
@@ -143,9 +161,20 @@ export async function runSyntheticBridge(options: {
     function fail(error: unknown) {
       if (!settled) {
         settled = true;
+        if (wholeRunTimeout) clearTimeout(wholeRunTimeout);
+        runAbortController.abort();
         child.kill();
         reject(error);
       }
+    }
+
+    const onExternalAbort = () => fail(runtimeFailure("run_cancelled", "Lambda-RLM run was cancelled."));
+    options.signal?.addEventListener("abort", onExternalAbort, { once: true });
+    if (options.signal?.aborted) onExternalAbort();
+    if (options.wholeRunTimeoutMs && options.wholeRunTimeoutMs > 0) {
+      wholeRunTimeout = setTimeout(() => {
+        fail(runtimeFailure("whole_run_timeout", `Lambda-RLM run exceeded whole-run timeout of ${options.wholeRunTimeoutMs}ms.`));
+      }, options.wholeRunTimeoutMs);
     }
 
     stdout.on("line", (line) => {
@@ -177,11 +206,46 @@ export async function runSyntheticBridge(options: {
         const call: ModelCall = {
           requestId: typed.requestId,
           prompt: typed.prompt,
+          signal: runAbortController.signal,
           ...(typeof typed.metadata === "object" && typed.metadata && !Array.isArray(typed.metadata)
             ? { metadata: typed.metadata as Record<string, unknown> }
             : {}),
         };
-        callbacks.push(call);
+        callbacks.push({
+          requestId: call.requestId,
+          prompt: call.prompt,
+          ...(call.metadata ? { metadata: call.metadata } : {}),
+        });
+        if (options.maxModelCalls !== undefined && startedModelCalls >= options.maxModelCalls) {
+          const response: LeafModelCallFailureDetails = {
+            ok: false,
+            requestId: call.requestId,
+            error: {
+              type: "child_process",
+              code: "max_model_calls_exceeded",
+              message: `Max model calls limit of ${options.maxModelCalls} was exhausted before ${call.requestId}.`,
+            },
+            diagnostics: { stdout: "", stderr: "", exitCode: null },
+          };
+          modelCallResponses.push(response);
+          fail(
+            new BridgeRunFailedError(
+              {
+                type: "run_result",
+                runId: options.runId,
+                ok: false,
+                error: { type: "runtime_control", code: "max_model_calls_exceeded", message: response.error.message },
+                modelCalls: startedModelCalls,
+                modelCallFailure: response,
+              },
+              { stderr, stdoutLines },
+              modelCallResponses,
+            ),
+          );
+          pendingCallbackId = undefined;
+          return;
+        }
+        startedModelCalls += 1;
         void options
           .modelCallRunner(call)
           .then((response) => {
@@ -274,6 +338,8 @@ export async function runSyntheticBridge(options: {
         return;
       }
       settled = true;
+      if (wholeRunTimeout) clearTimeout(wholeRunTimeout);
+      options.signal?.removeEventListener("abort", onExternalAbort);
       resolve({ ...finalResult, modelCallbacks: callbacks, modelCallResponses, finalResults, stdoutLines, stderr });
     });
   });

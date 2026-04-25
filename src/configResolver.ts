@@ -6,6 +6,9 @@ export type RunConfig = {
   maxInputBytes: number;
   outputMaxBytes: number;
   outputMaxLines: number;
+  maxModelCalls: number;
+  wholeRunTimeoutMs: number;
+  modelCallTimeoutMs: number;
 };
 
 export type ConfigValidationError = {
@@ -21,6 +24,9 @@ export const DEFAULT_RUN_CONFIG: RunConfig = {
   maxInputBytes: 1_200_000,
   outputMaxBytes: 51_200,
   outputMaxLines: 2_000,
+  maxModelCalls: 1_000,
+  wholeRunTimeoutMs: 300_000,
+  modelCallTimeoutMs: 60_000,
 };
 
 type Overlay = Partial<RunConfig>;
@@ -30,9 +36,19 @@ const TOML_TO_CONFIG: Record<string, keyof RunConfig> = {
   max_input_bytes: "maxInputBytes",
   output_max_bytes: "outputMaxBytes",
   output_max_lines: "outputMaxLines",
+  max_model_calls: "maxModelCalls",
+  whole_run_timeout_ms: "wholeRunTimeoutMs",
+  model_call_timeout_ms: "modelCallTimeoutMs",
 };
 
-const CONFIG_FIELDS = new Set<keyof RunConfig>(["maxInputBytes", "outputMaxBytes", "outputMaxLines"]);
+const CONFIG_FIELDS = new Set<keyof RunConfig>([
+  "maxInputBytes",
+  "outputMaxBytes",
+  "outputMaxLines",
+  "maxModelCalls",
+  "wholeRunTimeoutMs",
+  "modelCallTimeoutMs",
+]);
 
 function validationError(code: string, message: string, field: string): ConfigValidationError {
   return { type: "validation", code, message, field };
@@ -88,7 +104,7 @@ export function parseConfigToml(toml: string, source: "global" | "project" = "gl
     const tomlKey = assignment[1] ?? "";
     const configKey = TOML_TO_CONFIG[tomlKey];
     if (!configKey) {
-      return { ok: false, error: validationError("unknown_config_key", `Unknown [run] key ${tomlKey}. Supported keys: max_input_bytes, output_max_bytes, output_max_lines.`, `run.${tomlKey}`) };
+      return { ok: false, error: validationError("unknown_config_key", `Unknown [run] key ${tomlKey}. Supported keys: max_input_bytes, output_max_bytes, output_max_lines, max_model_calls, whole_run_timeout_ms, model_call_timeout_ms.`, `run.${tomlKey}`) };
     }
     if (seenKeys.has(tomlKey)) {
       return { ok: false, error: validationError("invalid_toml", `Duplicate [run] key ${tomlKey} in ${source} config at line ${lineNumber}.`, `run.${tomlKey}`) };

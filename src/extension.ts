@@ -24,6 +24,18 @@ export const LambdaRlmToolParameters = Type.Object(
       minimum: 1,
       description: "Optional per-run tightening for visible output lines; must be less than or equal to the resolved config limit.",
     })),
+    maxModelCalls: Type.Optional(Type.Number({
+      minimum: 1,
+      description: "Optional per-run tightening for maximum Formal Leaf model callbacks in this run; must be less than or equal to the resolved config limit.",
+    })),
+    wholeRunTimeoutMs: Type.Optional(Type.Number({
+      minimum: 1,
+      description: "Optional per-run tightening for the whole λ-RLM run timeout in milliseconds; must be less than or equal to the resolved config limit.",
+    })),
+    modelCallTimeoutMs: Type.Optional(Type.Number({
+      minimum: 1,
+      description: "Optional per-run tightening for each Formal Leaf model callback timeout in milliseconds; must be less than or equal to the resolved config limit.",
+    })),
   },
   { additionalProperties: false },
 );
@@ -44,8 +56,9 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
     promptSnippet: "Ask a question over one referenced context file without inlining file contents",
     promptGuidelines: [
       "Use lambda_rlm when a user asks a question over a large file by path and ordinary reading would waste parent-agent context.",
-      "Call lambda_rlm with contextPath and question, plus optional per-run tightening limits maxInputBytes/outputMaxBytes/outputMaxLines when needed; do not pass inline context, raw prompts, or multiple paths.",
+      "Call lambda_rlm with contextPath and question, plus optional per-run tightening limits maxInputBytes/outputMaxBytes/outputMaxLines/maxModelCalls/wholeRunTimeoutMs/modelCallTimeoutMs when needed; do not pass inline context, raw prompts, or multiple paths.",
       "lambda_rlm reads the path-based single-file input internally, runs vendored real Lambda-RLM planning and execution through the Python NDJSON bridge, and services model callbacks with extension-owned Formal Leaf child Pi calls.",
+      "Use maxModelCalls, wholeRunTimeoutMs, and modelCallTimeoutMs only to tighten budgets/deadlines for a single run; they cannot loosen configured defaults.",
       "Expect a bounded result; the tool should not expose the full source file contents by default.",
     ],
     parameters: LambdaRlmToolParameters,

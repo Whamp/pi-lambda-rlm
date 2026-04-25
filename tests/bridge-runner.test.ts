@@ -1,6 +1,6 @@
 import { once } from "node:events";
 import { spawn } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,14 @@ async function tempContextFile(content: string) {
   const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-bridge-test-"));
   const path = join(dir, "context.txt");
   await writeFile(path, content, "utf8");
+  return path;
+}
+
+async function tempPythonBridgeScript(source: string) {
+  const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-bridge-control-test-"));
+  const path = join(dir, "bridge.py");
+  await writeFile(path, source, "utf8");
+  await chmod(path, 0o755);
   return path;
 }
 
@@ -150,5 +158,101 @@ describe("Python NDJSON bridge runner", () => {
         error: { type: "protocol", code: "single_in_flight_violation" },
       },
     });
+  });
+
+  it("enforces max model calls before starting another leaf call and returns a structured runtime failure", async () => {
+    const contextPath = await tempContextFile("budget context");
+    const started: string[] = [];
+
+    await expect(
+      runSyntheticBridge({
+        bridgePath,
+        runId: "run-budget",
+        question: "What?",
+        contextPath,
+        maxModelCalls: 1,
+        modelCallRunner: async (call) => {
+          started.push(call.requestId);
+          return successfulModelCallRunner(call);
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: "BridgeRunFailedError",
+      details: {
+        error: { type: "runtime", code: "max_model_calls_exceeded" },
+        failedRunResult: {
+          modelCallFailure: {
+            requestId: "model-call-2",
+            error: { code: "max_model_calls_exceeded" },
+          },
+        },
+      },
+    });
+    expect(started).toEqual(["model-call-1"]);
+  });
+
+  it("aborts the Python bridge on whole-run timeout and reports partial runtime details", async () => {
+    const slowBridge = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import signal, sys, time
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+sys.stdin.readline()
+sys.stderr.write("slow bridge started\\n")
+sys.stderr.flush()
+time.sleep(30)
+`);
+
+    await expect(
+      runSyntheticBridge({
+        bridgePath: slowBridge,
+        runId: "run-timeout",
+        question: "What?",
+        contextPath: "context.txt",
+        wholeRunTimeoutMs: 30,
+        modelCallRunner: successfulModelCallRunner,
+      }),
+    ).rejects.toMatchObject({
+      name: "BridgeRunFailedError",
+      details: {
+        error: { type: "runtime", code: "whole_run_timeout" },
+        failedRunResult: { error: { type: "runtime_control", code: "whole_run_timeout" } },
+      },
+    });
+  });
+
+  it("user cancellation aborts the bridge and passes abort to an active model call", async () => {
+    const abortingBridge = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import json, sys, time
+request = json.loads(sys.stdin.readline())
+print(json.dumps({"type":"model_callback_request","runId":request["runId"],"requestId":"model-call-1","prompt":"slow","metadata":{}}), flush=True)
+time.sleep(30)
+`);
+    const controller = new AbortController();
+    let observedAbort = false;
+    const promise = runSyntheticBridge({
+      bridgePath: abortingBridge,
+      runId: "run-cancel",
+      question: "What?",
+      contextPath: "context.txt",
+      signal: controller.signal,
+      modelCallRunner: (call) =>
+        new Promise((resolve) => {
+          call.signal?.addEventListener("abort", () => {
+            observedAbort = true;
+            resolve({
+              ok: false,
+              requestId: call.requestId,
+              error: { type: "child_process", code: "model_call_cancelled", message: "cancelled" },
+              diagnostics: { stdout: "", stderr: "", exitCode: null, signal: "SIGTERM" },
+            });
+          });
+        }),
+    });
+
+    setTimeout(() => controller.abort(), 20);
+    await expect(promise).rejects.toMatchObject({
+      name: "BridgeRunFailedError",
+      details: { error: { type: "runtime", code: "run_cancelled" } },
+    });
+    expect(observedAbort).toBe(true);
   });
 });

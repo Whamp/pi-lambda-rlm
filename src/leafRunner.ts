@@ -52,6 +52,7 @@ export type ModelCall = {
   requestId: string;
   prompt: string;
   metadata?: Record<string, unknown>;
+  signal?: AbortSignal;
 };
 
 export type LeafModelCallSuccess = {
@@ -144,6 +145,35 @@ export async function runFormalPiLeafModelCall(call: ModelCall, options: FormalL
   const processRunner = options.processRunner ?? nodeProcessRunner;
   const tempDir = await mkdtemp(join(tmpdir(), "pi-lambda-rlm-leaf-"));
   const promptFilePath = join(tempDir, "prompt.txt");
+  const controller = new AbortController();
+  let timedOut = false;
+  let cancelled = false;
+  let timeout: NodeJS.Timeout | undefined;
+  const sourceSignal = call.signal ?? options.signal;
+  const onAbort = () => {
+    cancelled = true;
+    controller.abort();
+  };
+  sourceSignal?.addEventListener("abort", onAbort, { once: true });
+  if (options.timeoutMs && options.timeoutMs > 0) {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, options.timeoutMs);
+  }
+
+  const failure = (code: string, message: string, result: ProcessResult = { exitCode: null, stdout: "", stderr: "" }) =>
+    new LeafProcessFailure({
+      ok: false,
+      requestId: call.requestId,
+      error: { type: "child_process", code, message },
+      diagnostics: {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+        ...(result.signal !== undefined ? { signal: result.signal } : {}),
+      },
+    });
 
   try {
     await writeFile(promptFilePath, call.prompt, "utf8");
@@ -154,28 +184,28 @@ export async function runFormalPiLeafModelCall(call: ModelCall, options: FormalL
       ...(options.leafThinking ? { leafThinking: options.leafThinking } : {}),
       ...(options.systemPrompt ? { systemPrompt: options.systemPrompt } : {}),
     });
-    const result = await processRunner({
-      ...invocation,
-      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
+    let result: ProcessResult;
+    try {
+      result = await processRunner({
+        ...invocation,
+        ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (timedOut) throw failure("per_model_call_timeout", `Child pi leaf process exceeded per-model-call timeout of ${options.timeoutMs}ms.`);
+      if (cancelled || controller.signal.aborted) throw failure("model_call_cancelled", "Child pi leaf process was cancelled.");
+      throw error;
+    }
 
     if (result.exitCode !== 0) {
-      throw new LeafProcessFailure({
-        ok: false,
-        requestId: call.requestId,
-        error: {
-          type: "child_process",
-          code: "child_exit_nonzero",
-          message: `Child pi leaf process exited with code ${result.exitCode ?? "null"} signal ${result.signal ?? "null"}.`,
-        },
-        diagnostics: {
-          stdout: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.exitCode,
-          ...(result.signal !== undefined ? { signal: result.signal } : {}),
-        },
-      });
+      const code = timedOut ? "per_model_call_timeout" : cancelled ? "model_call_cancelled" : "child_exit_nonzero";
+      const message =
+        code === "per_model_call_timeout"
+          ? `Child pi leaf process exceeded per-model-call timeout of ${options.timeoutMs}ms.`
+          : code === "model_call_cancelled"
+            ? "Child pi leaf process was cancelled."
+            : `Child pi leaf process exited with code ${result.exitCode ?? "null"} signal ${result.signal ?? "null"}.`;
+      throw failure(code, message, result);
     }
 
     return {
@@ -185,6 +215,8 @@ export async function runFormalPiLeafModelCall(call: ModelCall, options: FormalL
       diagnostics: { stdoutChars: result.stdout.length, stderr: result.stderr, exitCode: result.exitCode },
     };
   } finally {
+    if (timeout) clearTimeout(timeout);
+    sourceSignal?.removeEventListener("abort", onAbort);
     await rm(tempDir, { recursive: true, force: true });
   }
 }
