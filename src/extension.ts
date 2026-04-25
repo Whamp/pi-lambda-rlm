@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import { executeLambdaRlmTool, LambdaRlmValidationError } from "./lambdaRlmTool.js";
+import type { ProcessRunner } from "./leafRunner.js";
 
 export const LambdaRlmToolParameters = Type.Object(
   {
@@ -17,19 +18,22 @@ export const LambdaRlmToolParameters = Type.Object(
 
 type ToolUpdate = { content: Array<{ type: "text"; text: string }>; details?: Record<string, unknown> };
 type MinimalPiApi = { registerTool(tool: Record<string, unknown>): void };
-type MinimalExtensionContext = { cwd: string };
+type MinimalExtensionContext = {
+  cwd: string;
+  leafProcessRunner?: ProcessRunner;
+};
 
 export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
   pi.registerTool({
     name: "lambda_rlm",
     label: "λ-RLM",
     description:
-      "Synthetic Lambda-RLM NDJSON bridge tracer bullet. Accepts only contextPath plus question, reads the file internally, and services one fake model callback through a Python child process.",
+      "Synthetic Lambda-RLM NDJSON bridge tracer bullet. Accepts only contextPath plus question, reads the file internally, and services one bridge model callback through a constrained child Pi leaf runner.",
     promptSnippet: "Ask a question over one referenced context file without inlining file contents",
     promptGuidelines: [
       "Use lambda_rlm when a user asks a question over a large file by path and ordinary reading would waste parent-agent context.",
       "Call lambda_rlm with contextPath and question only; do not pass inline context, raw prompts, or multiple paths in this bootstrap slice.",
-      "lambda_rlm currently runs a synthetic Python NDJSON bridge only; it does not run real Lambda-RLM or real child Pi calls yet.",
+      "lambda_rlm currently runs a synthetic Python NDJSON bridge and a Formal Leaf Profile child Pi call; it does not run real Lambda-RLM yet.",
     ],
     parameters: LambdaRlmToolParameters,
     async execute(
@@ -40,11 +44,15 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
       ctx: MinimalExtensionContext,
     ) {
       onUpdate?.({
-        content: [{ type: "text", text: "λ-RLM fake bootstrap: validating path input and reading context file internally." }],
+        content: [{ type: "text", text: "λ-RLM synthetic bridge: validating path input and preparing a constrained child Pi leaf call." }],
         details: { phase: "validate" },
       });
       try {
-        return await executeLambdaRlmTool(params, { cwd: ctx.cwd, ...(_signal ? { signal: _signal } : {}) });
+        return await executeLambdaRlmTool(params, {
+          cwd: ctx.cwd,
+          ...(ctx.leafProcessRunner ? { leafProcessRunner: ctx.leafProcessRunner } : {}),
+          ...(_signal ? { signal: _signal } : {}),
+        });
       } catch (error) {
         if (error instanceof LambdaRlmValidationError) {
           return {

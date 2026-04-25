@@ -30,6 +30,7 @@ describe("lambda_rlm Pi extension registration", () => {
 
     const result = await tool.execute("call-1", { contextPath: "CONTEXT.md", question: "What is this project about?" }, undefined, undefined, {
       cwd: process.cwd(),
+      leafProcessRunner: async () => ({ exitCode: 0, stdout: "synthetic model answer\n", stderr: "" }),
     });
 
     expect(result.content[0].text).toContain("Synthetic λ-RLM bridge answer");

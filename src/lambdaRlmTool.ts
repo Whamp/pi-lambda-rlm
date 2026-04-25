@@ -1,7 +1,8 @@
 import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runSyntheticBridge } from "./bridgeRunner.js";
+import { BridgeRunFailedError, runSyntheticBridge } from "./bridgeRunner.js";
+import { runFormalPiLeafModelCall, type LeafThinking, type ProcessRunner } from "./leafRunner.js";
 
 const ALLOWED_KEYS = new Set(["contextPath", "question"]);
 const VISIBLE_OUTPUT_LIMIT = 4096;
@@ -17,6 +18,20 @@ export type LambdaRlmToolResult = {
   content: TextContent[];
   details: Record<string, unknown>;
 };
+
+export class LambdaRlmRuntimeError extends Error {
+  readonly details: {
+    ok: false;
+    error: { type: "runtime"; code: string; message: string };
+    bridgeRun: Record<string, unknown>;
+  };
+
+  constructor(details: LambdaRlmRuntimeError["details"]) {
+    super(details.error.message);
+    this.name = "LambdaRlmRuntimeError";
+    this.details = details;
+  }
+}
 
 export class LambdaRlmValidationError extends Error {
   readonly details: {
@@ -103,30 +118,82 @@ function countLines(text: string) {
 
 export async function executeLambdaRlmTool(
   params: unknown,
-  options: { cwd?: string; bridgePath?: string; signal?: AbortSignal } = {},
+  options: {
+    cwd?: string;
+    bridgePath?: string;
+    signal?: AbortSignal;
+    piExecutable?: string;
+    leafModel?: string;
+    leafThinking?: LeafThinking;
+    leafProcessRunner?: ProcessRunner;
+    leafTimeoutMs?: number;
+  } = {},
 ): Promise<LambdaRlmToolResult> {
   const validated = validateLambdaRlmParams(params);
   const cwd = options.cwd ?? process.cwd();
   const loaded = await loadContextFile(validated.contextPath, cwd);
   const bridgePath = options.bridgePath ?? fileURLToPath(new URL("../.pi/extensions/lambda-rlm/bridge.py", import.meta.url));
   const runId = `lambda-rlm-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const leafModel = options.leafModel ?? process.env.LAMBDA_RLM_LEAF_MODEL ?? "google/gemini-3-flash-preview";
+  const leafThinking = options.leafThinking ?? "off";
 
-  const bridge = await runSyntheticBridge({
-    bridgePath,
-    runId,
-    contextPath: loaded.resolvedPath,
-    question: validated.question,
-    fakeModelResponse: `Synthetic model response for: ${validated.question}`,
-    ...(options.signal ? { signal: options.signal } : {}),
-  });
+  let bridge;
+  try {
+    bridge = await runSyntheticBridge({
+      bridgePath,
+      runId,
+      contextPath: loaded.resolvedPath,
+      question: validated.question,
+      modelCallRunner: (call) =>
+        runFormalPiLeafModelCall(call, {
+          ...(options.piExecutable ? { piExecutable: options.piExecutable } : {}),
+          leafModel,
+          leafThinking,
+          ...(options.leafTimeoutMs !== undefined ? { timeoutMs: options.leafTimeoutMs } : {}),
+          ...(options.leafProcessRunner ? { processRunner: options.leafProcessRunner } : {}),
+          ...(options.signal ? { signal: options.signal } : {}),
+        }),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+  } catch (error) {
+    if (error instanceof BridgeRunFailedError) {
+      throw new LambdaRlmRuntimeError({
+        ok: false,
+        error: error.details.error,
+        bridgeRun: {
+          executionStarted: true,
+          pythonBridge: true,
+          protocol: "strict-stdout-stdin-ndjson",
+          runId,
+          stdoutProtocolLines: error.details.diagnostics.stdoutLines.length,
+          stderrDiagnosticsChars: error.details.diagnostics.stderr.length,
+          modelCallResponses: error.details.modelCallResponses.map((response) => ({
+            ok: response.ok,
+            requestId: response.requestId,
+            ...(response.ok
+              ? { stdoutChars: response.diagnostics.stdoutChars }
+              : { error: response.error, diagnostics: response.diagnostics }),
+          })),
+          failedRunResult: error.details.failedRunResult,
+          finalResults: 1,
+          realLambdaRlm: false,
+          childPiLeafCalls: error.details.modelCallResponses.length,
+          leafProfile: "formal_pi_print",
+          leafModel,
+          leafThinking,
+        },
+      });
+    }
+    throw error;
+  }
 
   const rawAnswer = [
     "Synthetic λ-RLM bridge answer",
     "",
     bridge.content,
     "",
-    `The extension read the referenced file internally (${loaded.content.length} characters, ${countLines(loaded.content)} lines), started the Python NDJSON bridge, serviced one synthetic model callback, and received one final run result.`,
-    "This tracer bullet does not run real Lambda-RLM or real child Pi leaf calls.",
+    `The extension read the referenced file internally (${loaded.content.length} characters, ${countLines(loaded.content)} lines), started the Python NDJSON bridge, serviced one synthetic model callback with a constrained child Pi leaf runner, and received one final run result.`,
+    "This tracer bullet does not run real Lambda-RLM yet; it proves the bridge-to-leaf-runner path and Formal Leaf command shape.",
   ].join("\n");
   const answer = boundedText(rawAnswer);
 
@@ -155,16 +222,24 @@ export async function executeLambdaRlmTool(
           metadata: callback.metadata,
           promptChars: callback.prompt.length,
         })),
+        modelCallResponses: bridge.modelCallResponses.map((response) => ({
+          ok: response.ok,
+          requestId: response.requestId,
+          ...(response.ok ? { stdoutChars: response.diagnostics.stdoutChars } : { error: response.error }),
+        })),
         finalResults: bridge.finalResults.length,
         realLambdaRlm: false,
-        childPiLeafCalls: 0,
+        childPiLeafCalls: bridge.modelCallResponses.length,
+        leafProfile: "formal_pi_print",
+        leafModel,
+        leafThinking,
       },
       fakeRun: {
         engine: "synthetic-python-ndjson-bridge",
         executionStarted: true,
         pythonBridge: true,
         realLambdaRlm: false,
-        childPiLeafCalls: 0,
+        childPiLeafCalls: bridge.modelCallResponses.length,
       },
       output: {
         bounded: true,
@@ -172,7 +247,7 @@ export async function executeLambdaRlmTool(
         truncated: answer.truncated,
         maxVisibleChars: VISIBLE_OUTPUT_LIMIT,
       },
-      warnings: ["Synthetic bridge tracer bullet only; real Lambda-RLM and child Pi calls are intentionally out of scope."],
+      warnings: ["Synthetic bridge tracer bullet only; real Lambda-RLM is intentionally out of scope for this slice."],
     },
   };
 }

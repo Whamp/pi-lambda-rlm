@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -12,16 +12,30 @@ async function tempContextFile(content: string) {
 }
 
 describe("synthetic bridge lambda_rlm tool execution", () => {
-  it("reads contextPath internally, runs the synthetic Python bridge, and returns a bounded result without dumping source content", async () => {
+  it("reads contextPath internally, services the synthetic bridge callback through a constrained leaf runner, and returns a bounded result without dumping source content", async () => {
     const secretContent = "SECRET_SOURCE_CONTENT_SHOULD_NOT_BE_RETURNED\n".repeat(20);
     const contextPath = await tempContextFile(secretContent);
+    const processCalls: Array<{ args: string[]; prompt: string }> = [];
 
-    const result = await executeLambdaRlmTool({ contextPath, question: "What is this file about?" });
+    const result = await executeLambdaRlmTool(
+      { contextPath, question: "What is this file about?" },
+      {
+        leafModel: "google/gemini-test",
+        leafProcessRunner: async (invocation) => {
+          const promptFile = invocation.args.at(-1);
+          processCalls.push({
+            args: invocation.args,
+            prompt: promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "",
+          });
+          return { exitCode: 0, stdout: "synthetic model answer\n", stderr: "" };
+        },
+      },
+    );
 
     expect(result.content[0]).toMatchObject({ type: "text" });
     const text = result.content[0]?.type === "text" ? result.content[0].text : "";
     expect(text).toContain("Synthetic λ-RLM bridge answer");
-    expect(text).toContain("What is this file about?");
+    expect(text).toContain("synthetic model answer");
     expect(text.length).toBeLessThanOrEqual(4096);
     expect(text).not.toContain("SECRET_SOURCE_CONTENT_SHOULD_NOT_BE_RETURNED");
     expect(JSON.stringify(result.details)).not.toContain("SECRET_SOURCE_CONTENT_SHOULD_NOT_BE_RETURNED");
@@ -40,15 +54,79 @@ describe("synthetic bridge lambda_rlm tool execution", () => {
         stdoutProtocolLines: 2,
         finalResults: 1,
         realLambdaRlm: false,
-        childPiLeafCalls: 0,
+        childPiLeafCalls: 1,
+        leafProfile: "formal_pi_print",
+        leafModel: "google/gemini-test",
       },
       fakeRun: {
         engine: "synthetic-python-ndjson-bridge",
         executionStarted: true,
+        childPiLeafCalls: 1,
       },
       output: {
         bounded: true,
         truncated: false,
+      },
+    });
+    expect(processCalls).toHaveLength(1);
+    expect(processCalls[0]?.prompt).toContain("What is this file about?");
+    expect(processCalls[0]?.args).toEqual(
+      expect.arrayContaining(["--print", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates"]),
+    );
+  });
+
+  it("returns a structured runtime failure with child process diagnostics when the constrained leaf process exits non-zero", async () => {
+    const contextPath = await tempContextFile("context that is read internally");
+
+    await expect(
+      executeLambdaRlmTool(
+        { contextPath, question: "What fails?" },
+        {
+          leafModel: "google/gemini-test",
+          leafProcessRunner: async () => ({
+            exitCode: 7,
+            stdout: "leaf stdout before failure",
+            stderr: "leaf stderr auth failure",
+            signal: null,
+          }),
+        },
+      ),
+    ).rejects.toMatchObject({
+      details: {
+        ok: false,
+        error: {
+          type: "runtime",
+          code: "model_callback_failed",
+          message: expect.stringContaining("Child pi leaf process exited with code 7"),
+        },
+        bridgeRun: {
+          executionStarted: true,
+          pythonBridge: true,
+          modelCallResponses: [
+            {
+              ok: false,
+              requestId: "model-call-1",
+              error: { type: "child_process", code: "child_exit_nonzero" },
+              diagnostics: {
+                stdout: "leaf stdout before failure",
+                stderr: "leaf stderr auth failure",
+                exitCode: 7,
+                signal: null,
+              },
+            },
+          ],
+          failedRunResult: {
+            error: { type: "model_callback_failure", code: "model_callback_failed" },
+            modelCallFailure: {
+              diagnostics: {
+                stdout: "leaf stdout before failure",
+                stderr: "leaf stderr auth failure",
+                exitCode: 7,
+                signal: null,
+              },
+            },
+          },
+        },
       },
     });
   });
