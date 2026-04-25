@@ -24,6 +24,7 @@ venv/
 .worktrees/
 .env
 .env.*
+!.env.example
 
 # Logs
 *.log

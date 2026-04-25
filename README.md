@@ -69,7 +69,7 @@ Prerequisites:
 - Node.js and npm;
 - Python 3 available as `python3`;
 - the Pi CLI available as `pi` for real Formal Leaf calls;
-- local Pi model/auth setup for gated real smoke tests.
+- local Pi model/auth setup for explicit real smoke tests.
 
 From the repository root:
 
@@ -93,13 +93,16 @@ Inside Pi, run the non-mutating diagnostic command:
 
 The doctor checks Python availability, vendored Lambda-RLM imports, local fork seams, TOML configuration, prompt overlays, Pi executable availability, Formal Leaf command shape, and a mock bridge run.
 
-Optional real smoke test, only when Pi is authenticated and model access is available:
+Optional real smoke test, only when the local Pi CLI and configured local model endpoint are available:
 
 ```bash
-PI_LAMBDA_RLM_LEAF_SMOKE=1 \
-LAMBDA_RLM_LEAF_MODEL=google/gemini-3-flash-preview \
+cp .env.example .env
+# Edit .env and set LAMBDA_RLM_LEAF_MODEL to a model pattern accepted by `pi --model`,
+# normally <provider>/<model-id>.
 npm run test:pi-leaf-smoke
 ```
+
+`.env` is gitignored so machine-specific local model names and secrets stay out of the public repo.
 
 ## How the tool is called
 
@@ -307,7 +310,7 @@ src/
 
 examples/               # tiny reviewable tool-call fixtures
 docs/                   # smoke-test notes, future work, manual review checkpoint
-tests/                  # Vitest behavior tests and gated real smoke test
+tests/                  # Vitest behavior tests plus an explicit real smoke suite
 ```
 
 ## Verification
@@ -315,9 +318,9 @@ tests/                  # Vitest behavior tests and gated real smoke test
 Common development commands:
 
 ```bash
-npm test                    # run Vitest behavior tests
+npm test                    # run hermetic Vitest behavior tests
 npm run typecheck           # run TypeScript type checking without emitting files
-npm run test:pi-leaf-smoke  # gated real child Pi and end-to-end QA smoke tests; skips by default
+npm run test:pi-leaf-smoke  # run real local child Pi and end-to-end QA smoke tests
 ```
 
 Python checks:
@@ -327,13 +330,16 @@ python3 -m unittest discover -s tests/python -v
 python3 -m py_compile .pi/extensions/lambda-rlm/bridge.py $(find .pi/extensions/lambda-rlm/rlm -name '*.py' -type f | sort)
 ```
 
-Real smoke tests are gated because they require local Pi CLI authentication and model access:
+Real smoke tests are separate from `npm test` because they require the local Pi CLI and model endpoint:
 
 ```bash
-PI_LAMBDA_RLM_LEAF_SMOKE=1 \
-LAMBDA_RLM_LEAF_MODEL=google/gemini-3-flash-preview \
+cp .env.example .env
+# Edit .env and set LAMBDA_RLM_LEAF_MODEL to a model pattern accepted by `pi --model`,
+# normally <provider>/<model-id>.
 npm run test:pi-leaf-smoke
 ```
+
+`.env` is gitignored so machine-specific local model names and secrets stay out of the public repo.
 
 The smoke suite covers:
 

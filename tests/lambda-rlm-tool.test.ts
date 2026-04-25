@@ -257,7 +257,8 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
       expect.arrayContaining([
         "--print",
         "--no-session",
-        "--no-tools",
+        "--tools",
+        "read,grep,find,ls",
         "--no-extensions",
         "--no-skills",
         "--no-context-files",

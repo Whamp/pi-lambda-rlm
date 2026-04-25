@@ -6,7 +6,7 @@
   "scripts": {
     "lint": "ultracite check",
     "lint:fix": "ultracite fix",
-    "test": "vitest run",
+    "test": "vitest run --exclude tests/pi-leaf-smoke.test.ts",
     "test:pi-leaf-smoke": "vitest run tests/pi-leaf-smoke.test.ts",
     "typecheck": "tsc --noEmit"
   },

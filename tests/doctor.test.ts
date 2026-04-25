@@ -190,7 +190,11 @@ describe("lambda_rlm doctor diagnostics", () => {
     );
     expect(report.checks).toContainEqual(
       expect.objectContaining({
-        details: expect.objectContaining({ requiredFlagsPresent: true }),
+        details: expect.objectContaining({
+          readOnlyTools: "read,grep,find,ls",
+          readOnlyToolsPresent: true,
+          requiredFlagsPresent: true,
+        }),
         name: "formal_leaf_command",
         status: "ok",
       }),

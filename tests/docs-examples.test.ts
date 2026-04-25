@@ -24,7 +24,9 @@ describe("operator docs and examples", () => {
     expect(readme).toContain("Prompt overlays");
     expect(readme).toContain("manual copy only");
     expect(readme).toContain("/lambda-rlm-doctor");
-    expect(readme).toContain("PI_LAMBDA_RLM_LEAF_SMOKE=1");
+    expect(readme).toContain("npm run test:pi-leaf-smoke");
+    expect(readme).toContain("cp .env.example .env");
+    expect(readme).toContain("LAMBDA_RLM_LEAF_MODEL");
     expect(readme).toContain("MVP non-goals");
     expect(readme).toContain("Agentic Leaf Profiles");
     expect(readme).toContain("persistent workers");
@@ -37,6 +39,7 @@ describe("operator docs and examples", () => {
 
   it("ships reviewable examples for single-file QA, multi-file QA, and synthesis", async () => {
     const exampleFiles = [
+      ".env.example",
       "examples/single-file-qa/README.md",
       "examples/single-file-qa/context.md",
       "examples/multi-file-qa/README.md",

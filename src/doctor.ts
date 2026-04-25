@@ -1,5 +1,9 @@
 import { fileURLToPath } from "node:url";
-import { buildFormalPiLeafCommand, nodeProcessRunner } from "./leaf-runner.js";
+import {
+  FORMAL_LEAF_READ_ONLY_TOOLS,
+  buildFormalPiLeafCommand,
+  nodeProcessRunner,
+} from "./leaf-runner.js";
 import type { Awaitable, ProcessRunner } from "./leaf-runner.js";
 import { resolvePromptBundle } from "./prompt-resolver.js";
 import { resolveRunConfig } from "./config-resolver.js";
@@ -120,7 +124,7 @@ function verifyFormalLeafCommand(piExecutable: string) {
     promptFilePath: "/tmp/lambda-rlm-doctor-prompt.txt",
   });
   const requiredFlags = [
-    "--no-tools",
+    "--tools",
     "--no-extensions",
     "--no-skills",
     "--no-context-files",
@@ -128,7 +132,15 @@ function verifyFormalLeafCommand(piExecutable: string) {
     "--no-session",
   ];
   const missingFlags = requiredFlags.filter((flag) => !command.args.includes(flag));
-  return { command, missingFlags, requiredFlags, requiredFlagsPresent: missingFlags.length === 0 };
+  const readOnlyToolsPresent = command.args.includes(FORMAL_LEAF_READ_ONLY_TOOLS);
+  return {
+    command,
+    missingFlags,
+    readOnlyTools: FORMAL_LEAF_READ_ONLY_TOOLS,
+    readOnlyToolsPresent,
+    requiredFlags,
+    requiredFlagsPresent: missingFlags.length === 0 && readOnlyToolsPresent,
+  };
 }
 
 async function defaultMockBridgeRunner(
@@ -294,14 +306,14 @@ function formalLeafCommandCheck(piExecutable: string) {
     return check(
       "formal_leaf_command",
       "ok",
-      "Formal Leaf child command includes required no-tools/no-extensions/no-skills/no-context/no-prompt/no-session flags.",
+      "Formal Leaf child command includes Pi's read-only tools plus no-extensions/no-skills/no-context/no-prompt/no-session flags.",
       commandShape,
     );
   }
   return check(
     "formal_leaf_command",
     "error",
-    `Formal Leaf child command is missing required flag(s): ${commandShape.missingFlags.join(", ")}.`,
+    `Formal Leaf child command is missing required read-only tool configuration or flag(s): ${commandShape.missingFlags.join(", ")}.`,
     commandShape,
     "Update buildFormalPiLeafCommand so all Formal Leaf Profile disabling flags are present.",
   );

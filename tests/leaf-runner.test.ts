@@ -19,7 +19,7 @@ function resolveOnAbort(
 }
 
 describe("Formal Pi leaf runner", () => {
-  it("constructs a constrained pi -p command for the Formal Leaf Profile", () => {
+  it("constructs a constrained pi -p command with Pi's read-only toolset", () => {
     const command = buildFormalPiLeafCommand({
       leafModel: "google/gemini-test",
       leafThinking: "off",
@@ -40,7 +40,8 @@ describe("Formal Pi leaf runner", () => {
         "off",
         "--system-prompt",
         FORMAL_LEAF_SYSTEM_PROMPT,
-        "--no-tools",
+        "--tools",
+        "read,grep,find,ls",
         "--no-extensions",
         "--no-skills",
         "--no-context-files",
@@ -50,7 +51,9 @@ describe("Formal Pi leaf runner", () => {
       command: "pi",
     });
 
-    expect(command.args).toContain("--no-tools");
+    expect(command.args).toContain("--tools");
+    expect(command.args).toContain("read,grep,find,ls");
+    expect(command.args).not.toContain("--no-tools");
     expect(command.args).toContain("--no-extensions");
     expect(command.args).toContain("--no-skills");
     expect(command.args).toContain("--no-context-files");
@@ -89,7 +92,8 @@ describe("Formal Pi leaf runner", () => {
     });
     expect(calls[0]?.args).toStrictEqual(
       expect.arrayContaining([
-        "--no-tools",
+        "--tools",
+        "read,grep,find,ls",
         "--no-extensions",
         "--no-skills",
         "--no-context-files",

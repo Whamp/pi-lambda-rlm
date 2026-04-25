@@ -13,6 +13,8 @@ export const FORMAL_LEAF_SYSTEM_PROMPT = [
   "Do not ask follow-up questions.",
 ].join("\n");
 
+export const FORMAL_LEAF_READ_ONLY_TOOLS = "read,grep,find,ls";
+
 export type LeafThinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 export interface ProcessInvocation {
@@ -109,7 +111,8 @@ export function buildFormalPiLeafCommand(options: FormalPiLeafCommandOptions): {
       options.leafThinking ?? "off",
       "--system-prompt",
       options.systemPrompt ?? FORMAL_LEAF_SYSTEM_PROMPT,
-      "--no-tools",
+      "--tools",
+      FORMAL_LEAF_READ_ONLY_TOOLS,
       "--no-extensions",
       "--no-skills",
       "--no-context-files",
