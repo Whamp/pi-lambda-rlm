@@ -25,15 +25,44 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(Object.keys(tool.parameters.properties).sort()).toEqual(["contextPath", "question"]);
   });
 
+  it("describes the public tool as the real path-based Lambda-RLM integration", async () => {
+    const tool = registeredLambdaRlmTool();
+    const updates: any[] = [];
+
+    await tool.execute(
+      "metadata-check",
+      { contextPath: "/definitely/missing/context.txt", question: "What?" },
+      undefined,
+      (update: any) => updates.push(update),
+      { cwd: process.cwd() },
+    );
+
+    const publicMetadataText = JSON.stringify({
+      description: tool.description,
+      promptGuidelines: tool.promptGuidelines,
+      onUpdate: updates.flatMap((update) => update.content.map((content: any) => content.text)),
+    });
+
+    expect(publicMetadataText).not.toMatch(/synthetic|fake|tracer|does not run real Lambda-RLM yet/i);
+    expect(publicMetadataText).toMatch(/real Lambda-RLM/i);
+    expect(publicMetadataText).toMatch(/Formal Leaf/i);
+    expect(publicMetadataText).toMatch(/path-based|contextPath/i);
+  });
+
   it("executes through the registered public tool path", async () => {
     const tool = registeredLambdaRlmTool();
 
     const result = await tool.execute("call-1", { contextPath: "CONTEXT.md", question: "What is this project about?" }, undefined, undefined, {
       cwd: process.cwd(),
-      leafProcessRunner: async () => ({ exitCode: 0, stdout: "synthetic model answer\n", stderr: "" }),
+      leafProcessRunner: async (invocation: any) => {
+        const promptFile = invocation.args.at(-1);
+        const prompt = promptFile?.startsWith("@") ? await import("node:fs/promises").then((fs) => fs.readFile(promptFile.slice(1), "utf8")) : "";
+        return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : "synthetic model answer\n", stderr: "" };
+      },
     });
 
-    expect(result.content[0].text).toContain("Synthetic λ-RLM bridge answer");
+    expect(result.content[0].text).toContain("Real Lambda-RLM completed");
+    expect(result.content[0].text).toContain("synthetic model answer");
     expect(result.details.ok).toBe(true);
     expect(JSON.stringify(result.details)).not.toContain("Path-Based Context Ingestion");
   });

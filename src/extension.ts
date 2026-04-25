@@ -28,12 +28,13 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
     name: "lambda_rlm",
     label: "λ-RLM",
     description:
-      "Synthetic Lambda-RLM NDJSON bridge tracer bullet. Accepts only contextPath plus question, reads the file internally, and services one bridge model callback through a constrained child Pi leaf runner.",
+      "Runs real vendored Lambda-RLM over one path-based context file through the Python NDJSON bridge, using extension-owned Formal Leaf model callbacks and returning a bounded answer.",
     promptSnippet: "Ask a question over one referenced context file without inlining file contents",
     promptGuidelines: [
       "Use lambda_rlm when a user asks a question over a large file by path and ordinary reading would waste parent-agent context.",
-      "Call lambda_rlm with contextPath and question only; do not pass inline context, raw prompts, or multiple paths in this bootstrap slice.",
-      "lambda_rlm currently runs a synthetic Python NDJSON bridge and a Formal Leaf Profile child Pi call; it does not run real Lambda-RLM yet.",
+      "Call lambda_rlm with contextPath and question only; do not pass inline context, raw prompts, or multiple paths.",
+      "lambda_rlm reads the path-based single-file input internally, runs vendored real Lambda-RLM planning and execution through the Python NDJSON bridge, and services model callbacks with extension-owned Formal Leaf child Pi calls.",
+      "Expect a bounded result; the tool should not expose the full source file contents by default.",
     ],
     parameters: LambdaRlmToolParameters,
     async execute(
@@ -44,7 +45,12 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
       ctx: MinimalExtensionContext,
     ) {
       onUpdate?.({
-        content: [{ type: "text", text: "λ-RLM synthetic bridge: validating path input and preparing a constrained child Pi leaf call." }],
+        content: [
+          {
+            type: "text",
+            text: "λ-RLM real path-based run: validating contextPath before starting the Python NDJSON bridge, vendored Lambda-RLM, and Formal Leaf callbacks.",
+          },
+        ],
         details: { phase: "validate" },
       });
       try {
