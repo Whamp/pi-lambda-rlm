@@ -87,7 +87,7 @@ describe("lambda_rlm Pi extension registration", () => {
         field: "contextPath",
         message: expect.stringContaining("Unable to read contextPath before execution"),
       },
-      fakeRun: { executionStarted: false },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
     });
   });
 

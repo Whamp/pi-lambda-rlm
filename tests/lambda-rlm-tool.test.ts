@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -8,6 +8,14 @@ async function tempContextFile(content: string) {
   const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-test-"));
   const path = join(dir, "context.txt");
   await writeFile(path, content, "utf8");
+  return path;
+}
+
+async function tempPythonBridgeScript(source: string) {
+  const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-bridge-script-"));
+  const path = join(dir, "bridge.py");
+  await writeFile(path, source, "utf8");
+  await chmod(path, 0o755);
   return path;
 }
 
@@ -58,11 +66,17 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
     expect(JSON.stringify(result.details)).not.toContain("SECRET_SOURCE_CONTENT_SHOULD_NOT_BE_RETURNED");
     expect(result.details).toMatchObject({
       ok: true,
+      authoritativeAnswerAvailable: true,
       input: {
         source: "file",
         contextPath,
         contextChars: secretContent.length,
         questionChars: "Who wrote notes about the Analytical Engine?".length,
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+      modelCalls: {
+        total: processCalls.length,
+        failed: 0,
       },
       bridgeRun: {
         executionStarted: true,
@@ -90,52 +104,55 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
   it("returns a structured runtime failure with child process diagnostics when the constrained leaf process exits non-zero", async () => {
     const contextPath = await tempContextFile("context that is read internally");
 
-    await expect(
-      executeLambdaRlmTool(
-        { contextPath, question: "What fails?" },
-        {
-          leafModel: "google/gemini-test",
-          leafProcessRunner: async () => ({
-            exitCode: 7,
-            stdout: "leaf stdout before failure",
-            stderr: "leaf stderr auth failure",
-            signal: null,
-          }),
-        },
-      ),
-    ).rejects.toMatchObject({
-      details: {
-        ok: false,
-        error: {
-          type: "runtime",
-          code: "model_callback_failed",
-          message: expect.stringContaining("Child pi leaf process exited with code 7"),
-        },
-        bridgeRun: {
-          executionStarted: true,
-          pythonBridge: true,
-          modelCallResponses: [
-            {
-              ok: false,
-              requestId: "model-call-1",
-              error: { type: "child_process", code: "child_exit_nonzero" },
-              diagnostics: {
-                stdout: "leaf stdout before failure",
-                stderr: "leaf stderr auth failure",
-                exitCode: 7,
-                signal: null,
-              },
+    const result = await executeLambdaRlmTool(
+      { contextPath, question: "What fails?" },
+      {
+        leafModel: "google/gemini-test",
+        leafProcessRunner: async () => ({
+          exitCode: 7,
+          stdout: "leaf stdout before failure",
+          stderr: "leaf stderr auth failure",
+          signal: null,
+        }),
+      },
+    );
+
+    expect(result.content[0]!.text).toContain("No authoritative answer is available");
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "runtime_failed",
+      answer: null,
+      authoritativeAnswerAvailable: false,
+      error: {
+        type: "runtime",
+        code: "model_callback_failed",
+        message: expect.stringContaining("Child pi leaf process exited with code 7"),
+      },
+      partialRun: {
+        executionStarted: true,
+        partialDetailsAvailable: true,
+        pythonBridge: true,
+        modelCallResponses: [
+          {
+            ok: false,
+            requestId: "model-call-1",
+            error: { type: "child_process", code: "child_exit_nonzero" },
+            diagnostics: {
+              stdout: "leaf stdout before failure",
+              stderr: "leaf stderr auth failure",
+              exitCode: 7,
+              signal: null,
             },
-          ],
-          failedRunResult: {
-            error: { type: "model_callback_failure", code: "model_callback_failed" },
-            modelCallFailure: {
-              diagnostics: {
-                stdout: "leaf stdout before failure",
-                stderr: "leaf stderr auth failure",
-                exitCode: 7,
-                signal: null,
-              },
+          },
+        ],
+        failedRunResult: {
+          error: { type: "model_callback_failure", code: "model_callback_failed" },
+          modelCallFailure: {
+            diagnostics: {
+              stdout: "leaf stdout before failure",
+              stderr: "leaf stderr auth failure",
+              exitCode: 7,
+              signal: null,
             },
           },
         },
@@ -154,25 +171,28 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
     [{ contextPath: "file.txt", question: "What?", contextPaths: ["a", "b"] }, "unsupported_input"],
     [{ contextPath: "file.txt", question: "What?", path: "other.txt" }, "unsupported_input"],
     [{ contextPath: "file.txt", question: "What?", extra: true }, "unknown_keys"],
-  ])("rejects invalid public input shape %#", async (params, code) => {
-    await expect(executeLambdaRlmTool(params)).rejects.toMatchObject({
-      name: "LambdaRlmValidationError",
-      details: {
-        ok: false,
-        error: { type: "validation", code },
-        fakeRun: { executionStarted: false },
-      },
+  ])("returns a pre-execution validation failure result for invalid public input shape %#", async (params, code) => {
+    const result = await executeLambdaRlmTool(params);
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "validation_failed",
+      error: { type: "validation", code },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
     });
+    expect(result.details).not.toHaveProperty("partialRun");
   });
 
   it("fails before execution with structured validation details when the context file is missing", async () => {
-    await expect(executeLambdaRlmTool({ contextPath: "/definitely/missing/context.txt", question: "What?" })).rejects.toMatchObject({
-      details: {
-        ok: false,
-        error: { type: "validation", code: "missing_context_path_file", field: "contextPath" },
-        fakeRun: { executionStarted: false },
-      },
+    const result = await executeLambdaRlmTool({ contextPath: "/definitely/missing/context.txt", question: "What?" });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "validation_failed",
+      error: { type: "validation", code: "missing_context_path_file", field: "contextPath" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
     });
+    expect(result.details).not.toHaveProperty("partialRun");
   });
 
   it("fails before execution with structured validation details when contextPath is not a file", async () => {
@@ -180,12 +200,111 @@ describe("real Lambda-RLM bridge lambda_rlm tool execution", () => {
     const childDir = join(dir, "not-a-file");
     await mkdir(childDir);
 
-    await expect(executeLambdaRlmTool({ contextPath: childDir, question: "What?" })).rejects.toMatchObject({
-      details: {
-        ok: false,
-        error: { type: "validation", code: "unreadable_context_path", field: "contextPath" },
-        fakeRun: { executionStarted: false },
+    const result = await executeLambdaRlmTool({ contextPath: childDir, question: "What?" });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "validation_failed",
+      error: { type: "validation", code: "unreadable_context_path", field: "contextPath" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
+    });
+    expect(result.details).not.toHaveProperty("partialRun");
+  });
+
+  it("returns a structured runtime failure when the bridge emits malformed stdout after execution starts", async () => {
+    const contextPath = await tempContextFile("context read before malformed bridge output");
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import sys
+sys.stdin.readline()
+sys.stderr.write("bridge diagnostic before malformed stdout\\n")
+sys.stderr.flush()
+print("{not json", flush=True)
+`);
+
+    const result = await executeLambdaRlmTool({ contextPath, question: "What happened?" }, { bridgePath });
+
+    expect(result.content[0]!.text).toContain("No authoritative answer is available");
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "runtime_failed",
+      answer: null,
+      authoritativeAnswerAvailable: false,
+      error: {
+        type: "protocol",
+        code: "malformed_stdout_json",
+        message: expect.stringContaining("Bridge stdout line was not valid JSON"),
+      },
+      partialRun: {
+        executionStarted: true,
+        partialDetailsAvailable: true,
+        pythonBridge: true,
+        protocol: "strict-stdout-stdin-ndjson",
+        stdoutProtocolLines: 1,
+        stderrDiagnosticsChars: expect.any(Number),
+        protocolError: {
+          code: "malformed_stdout_json",
+          stdoutLine: "{not json",
+        },
       },
     });
+  });
+
+  it("returns a structured runtime failure when the bridge exits without a final result", async () => {
+    const contextPath = await tempContextFile("context read before missing bridge result");
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import sys
+sys.stdin.readline()
+sys.stderr.write("bridge exited before final result\\n")
+sys.stderr.flush()
+sys.exit(0)
+`);
+
+    const result = await executeLambdaRlmTool({ contextPath, question: "What happened?" }, { bridgePath });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "runtime_failed",
+      answer: null,
+      authoritativeAnswerAvailable: false,
+      error: {
+        type: "protocol",
+        code: "missing_final_result",
+      },
+      partialRun: {
+        executionStarted: true,
+        partialDetailsAvailable: true,
+        pythonBridge: true,
+        stdoutProtocolLines: 0,
+        finalResults: 0,
+      },
+    });
+  });
+
+  it("truncates long visible output deterministically, preserves the compact run summary, and writes recoverable full output when configured", async () => {
+    const contextPath = await tempContextFile("short source");
+    const fullOutputDir = await mkdtemp(join(tmpdir(), "lambda-rlm-full-output-"));
+    const longAnswer = `ANSWER-${"x".repeat(500)}`;
+
+    const result = await executeLambdaRlmTool(
+      { contextPath, question: "Produce long output" },
+      {
+        outputMaxVisibleChars: 180,
+        fullOutputDir,
+        leafProcessRunner: async (invocation) => {
+          const promptFile = invocation.args.at(-1);
+          const prompt = promptFile?.startsWith("@") ? await readFile(promptFile.slice(1), "utf8") : "";
+          return { exitCode: 0, stdout: prompt.includes("Single digit:") ? "2\n" : `${longAnswer}\n`, stderr: "" };
+        },
+      },
+    );
+
+    expect(result.content[0]!.text.length).toBeLessThanOrEqual(180);
+    expect(result.content[0]!.text).toContain("truncated");
+    expect(result.content[0]!.text).toContain("Run summary: Real Lambda-RLM completed");
+    expect(result.content[0]!.text).toContain("Model calls:");
+    expect(result.details).toMatchObject({ ok: true, output: { truncated: true, maxVisibleChars: 180 } });
+    const fullOutputPath = (result.details.output as any).fullOutputPath;
+    expect(fullOutputPath).toEqual(expect.stringContaining(fullOutputDir));
+    await expect(readFile(fullOutputPath, "utf8")).resolves.toContain(longAnswer);
   });
 });
