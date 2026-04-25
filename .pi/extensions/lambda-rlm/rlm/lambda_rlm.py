@@ -546,7 +546,7 @@ class LambdaRLM:
         """
         RegisterLibrary: inject pre-verified combinators L into repl.globals.
 
-        Registered names: _Split, _Peek, _Reduce, _FilterRelevant.
+        Registered names: _Split, _Peek, _Reduce, _FilterRelevant, _RenderQaPrompt.
         These are pure Python — no arbitrary LLM code.
         _Reduce may call repl._llm_query for merge-type operators (each call is
         a single bounded LLM invocation, not an open-ended loop).
@@ -686,6 +686,9 @@ class LambdaRLM:
             def _reduce(parts: list[str]) -> str:
                 return "\n\n".join(parts)
 
+        def _render_qa_prompt(*, text: str, query: str) -> str:
+            return self.prompt_registry.render_qa(text=text, query=query)
+
         # ── FilterRelevant(query, [(chunk, preview)]) → [chunk] ──────────────
         # Used only when pipeline.use_filter=True (QA, Extraction).
         # Each call is one bounded LLM invocation (YES/NO), not a loop.
@@ -717,6 +720,7 @@ class LambdaRLM:
         repl.globals["_Peek"]           = _peek
         repl.globals["_Reduce"]         = _reduce
         repl.globals["_FilterRelevant"] = _filter_relevant
+        repl.globals["_RenderQaPrompt"] = _render_qa_prompt
 
     # ── Internal: Phase 5b — BuildExecutor + execute ─────────────────────────
 
@@ -726,7 +730,7 @@ class LambdaRLM:
 
         Φ is defined as a recursive Python function (not LLM-generated code).
         It references only combinators already registered in repl.globals:
-          _Split, _Peek, _Reduce, _FilterRelevant  (from _register_library)
+          _Split, _Peek, _Reduce, _FilterRelevant, _RenderQaPrompt  (from _register_library)
           llm_query                                 (auto-registered by LocalREPL)
           context_0                                 (from LocalREPL.load_context)
 
@@ -754,8 +758,7 @@ class LambdaRLM:
             compose_op=plan.compose_op,
         )
         if plan.task_type == TaskType.QA and query:
-            qa_template = self.prompt_registry.qa_template
-            leaf_prompt_expr = f"{repr(qa_template)}.replace('<<text>>', P).replace('<<query>>', {repr(query)})"
+            leaf_prompt_expr = f"_RenderQaPrompt(text=P, query={repr(query)})"
         elif plan.task_type == TaskType.QA:
             # No query available — preserve the legacy generic QA fallback.
             leaf_prompt_expr = f"{repr(QA_FALLBACK_TEMPLATE)}.format(text=P)"
