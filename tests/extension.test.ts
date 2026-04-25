@@ -25,6 +25,30 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(Object.keys(tool.parameters.properties).sort()).toEqual(["contextPath", "question"]);
   });
 
+  it("describes the public tool as the real path-based Lambda-RLM integration", async () => {
+    const tool = registeredLambdaRlmTool();
+    const updates: any[] = [];
+
+    await tool.execute(
+      "metadata-check",
+      { contextPath: "/definitely/missing/context.txt", question: "What?" },
+      undefined,
+      (update: any) => updates.push(update),
+      { cwd: process.cwd() },
+    );
+
+    const publicMetadataText = JSON.stringify({
+      description: tool.description,
+      promptGuidelines: tool.promptGuidelines,
+      onUpdate: updates.flatMap((update) => update.content.map((content: any) => content.text)),
+    });
+
+    expect(publicMetadataText).not.toMatch(/synthetic|fake|tracer|does not run real Lambda-RLM yet/i);
+    expect(publicMetadataText).toMatch(/real Lambda-RLM/i);
+    expect(publicMetadataText).toMatch(/Formal Leaf/i);
+    expect(publicMetadataText).toMatch(/path-based|contextPath/i);
+  });
+
   it("executes through the registered public tool path", async () => {
     const tool = registeredLambdaRlmTool();
 
