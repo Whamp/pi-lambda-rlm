@@ -200,15 +200,24 @@ print(json.dumps({"type":"${leakingType}"}), flush=True)
     await once(child, "exit");
   });
 
-  it("fails single-in-flight mode when the bridge emits a second callback before the first response", async () => {
+  it("fails single-in-flight mode when the bridge emits a second callback before the first response, even if the bridge exits immediately", async () => {
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import json, os, sys
+request = json.loads(sys.stdin.readline())
+first = {"type":"model_callback_request","runId":request["runId"],"requestId":"model-call-1","prompt":"first callback","metadata":{"phase":"test"}}
+second = dict(first)
+second["requestId"] = "model-call-2"
+os.write(1, (json.dumps(first) + "\\n" + json.dumps(second) + "\\n").encode("utf-8"))
+os._exit(0)
+`);
+
     await expect(
       runSyntheticBridge({
         bridgePath,
         runId: "run-duplicate-callback",
         question: "What?",
         contextPath: "context.txt",
-        modelCallRunner: successfulModelCallRunner,
-        bridgeArgs: ["--emit-second-callback"],
+        modelCallRunner: () => new Promise(() => undefined),
       }),
     ).rejects.toMatchObject({
       name: "BridgeProtocolError",
@@ -287,14 +296,19 @@ time.sleep(30)
 `);
     const controller = new AbortController();
     let observedAbort = false;
+    let markModelCallActive!: () => void;
+    const modelCallActive = new Promise<void>((resolve) => {
+      markModelCallActive = resolve;
+    });
     const promise = runSyntheticBridge({
       bridgePath: abortingBridge,
       runId: "run-cancel",
       question: "What?",
       contextPath: "context.txt",
       signal: controller.signal,
-      modelCallRunner: (call) =>
-        new Promise((resolve) => {
+      modelCallRunner: (call) => {
+        markModelCallActive();
+        return new Promise((resolve) => {
           call.signal?.addEventListener("abort", () => {
             observedAbort = true;
             resolve({
@@ -304,10 +318,12 @@ time.sleep(30)
               diagnostics: { stdout: "", stderr: "", exitCode: null, signal: "SIGTERM" },
             });
           });
-        }),
+        });
+      },
     });
 
-    setTimeout(() => controller.abort(), 20);
+    await modelCallActive;
+    controller.abort();
     await expect(promise).rejects.toMatchObject({
       name: "BridgeRunFailedError",
       details: { error: { type: "runtime", code: "run_cancelled" } },

@@ -176,6 +176,7 @@ export async function runSyntheticBridge(options: {
   const stdout = createInterface({ input: child.stdout });
   let failBridge: (error: unknown) => void = () => undefined;
   let writeBridgeMessage: (message: unknown, description: string) => Promise<void> = async () => undefined;
+  let removeExternalAbortListener: () => void = () => undefined;
 
   const done = new Promise<CompletedSyntheticBridgeRun>((resolve, reject) => {
     child.stderr.on("data", (chunk: Buffer) => {
@@ -194,6 +195,7 @@ export async function runSyntheticBridge(options: {
       if (!settled) {
         settled = true;
         if (wholeRunTimeout) clearTimeout(wholeRunTimeout);
+        removeExternalAbortListener();
         runAbortController.abort();
         child.kill();
         reject(error);
@@ -251,6 +253,7 @@ export async function runSyntheticBridge(options: {
 
     const onExternalAbort = () => fail(runtimeFailure("run_cancelled", "Lambda-RLM run was cancelled."));
     options.signal?.addEventListener("abort", onExternalAbort, { once: true });
+    removeExternalAbortListener = () => options.signal?.removeEventListener("abort", onExternalAbort);
     if (options.signal?.aborted) onExternalAbort();
     if (options.wholeRunTimeoutMs && options.wholeRunTimeoutMs > 0) {
       wholeRunTimeout = setTimeout(() => {
@@ -424,9 +427,12 @@ export async function runSyntheticBridge(options: {
       fail(protocolError("unknown_stdout_message_type", "Unknown bridge stdout message type.", line));
     });
 
-    child.on("error", fail);
-    child.on("exit", (code, signal) => {
-      if (settled) return;
+    let bridgeExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+    let stdoutClosed = false;
+
+    function finishAfterBridgeExitAndStdoutClose() {
+      if (settled || !bridgeExit || !stdoutClosed) return;
+      const { code, signal } = bridgeExit;
       if (code !== 0) {
         fail(protocolError("bridge_exit_nonzero", `Bridge exited with code ${code ?? "null"} signal ${signal ?? "null"}.`));
         return;
@@ -442,8 +448,18 @@ export async function runSyntheticBridge(options: {
       }
       settled = true;
       if (wholeRunTimeout) clearTimeout(wholeRunTimeout);
-      options.signal?.removeEventListener("abort", onExternalAbort);
+      removeExternalAbortListener();
       resolve({ ...finalResult, modelCallbacks: callbacks, modelCallResponses, finalResults, stdoutLines, stderr });
+    }
+
+    stdout.on("close", () => {
+      stdoutClosed = true;
+      finishAfterBridgeExitAndStdoutClose();
+    });
+    child.on("error", fail);
+    child.on("exit", (code, signal) => {
+      bridgeExit = { code, signal };
+      finishAfterBridgeExitAndStdoutClose();
     });
   });
 
