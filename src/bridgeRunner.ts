@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { LeafProcessFailure, type LeafModelCallFailureDetails, type LeafModelCallSuccess, type ModelCall } from "./leafRunner.js";
+import { ModelCallQueueCancelledError } from "./modelCallQueue.js";
 
 export type BridgeRunRequest = {
   type: "run_request";
@@ -260,7 +261,14 @@ export async function runSyntheticBridge(options: {
               const response: LeafModelCallFailureDetails =
                 error instanceof LeafProcessFailure
                   ? error.details
-                  : {
+                  : error instanceof ModelCallQueueCancelledError
+                    ? {
+                        ok: false,
+                        requestId: call.requestId,
+                        error: { type: "child_process", code: "model_call_cancelled", message: error.message },
+                        diagnostics: { stdout: "", stderr: "", exitCode: null, signal: "SIGTERM" },
+                      }
+                    : {
                       ok: false,
                       requestId: call.requestId,
                       error: {
