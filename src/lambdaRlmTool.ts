@@ -427,7 +427,7 @@ export async function executeLambdaRlmTool(
             message: error.details.error.message,
             ...(error.details.diagnostics.offendingLine ? { offendingStdoutLine: error.details.diagnostics.offendingLine } : {}),
           },
-          finalResults: 0,
+          ...(error.details.finalResults !== undefined ? { finalResults: error.details.finalResults } : {}),
           realLambdaRlm: true,
           childPiLeafCalls: 0,
           leafProfile: "formal_pi_print",

@@ -482,7 +482,7 @@ print("{not json", flush=True)
     const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
 import json, sys
 request = json.loads(sys.stdin.readline())
-print(json.dumps({"type":"run_result","runId":request["runId"],"ok":False,"error":{"type":"runtime","code":"bridge_failed","message":"failed safely"},"modelCallFailure":{"ok":False,"requestId":"model-call-x","error":{"type":"child_process","code":"child_exit_nonzero","message":"child failed"},"diagnostics":{"stdout":"RAW_FAILED_PAYLOAD_STDOUT","stderr":"RAW_FAILED_PAYLOAD_STDERR","exitCode":2}}}), flush=True)
+print(json.dumps({"type":"run_result","runId":request["runId"],"ok":False,"error":{"type":"runtime","code":"bridge_failed","message":"failed safely"},"modelCallFailure":{"ok":False,"requestId":"model-call-x","rawPrompt":"RAW_PROMPT_SECRET_SENTINEL","source":"MODEL_RUNNER_SOURCE_SENTINEL","error":{"type":"child_process","code":"child_exit_nonzero","message":"child failed"},"diagnostics":{"stdout":"RAW_FAILED_PAYLOAD_STDOUT","stderr":"RAW_FAILED_PAYLOAD_STDERR","stdoutSha256":"SPOOFED_STDOUT_HASH_SENTINEL","stderrSha256":"SPOOFED_STDERR_HASH_SENTINEL","exitCode":2}}}), flush=True)
 `);
 
     const result = await executeLambdaRlmTool({ contextPath, question: "What happened?" }, { bridgePath });
@@ -490,21 +490,62 @@ print(json.dumps({"type":"run_result","runId":request["runId"],"ok":False,"error
     const serialized = JSON.stringify(result.details);
     expect(serialized).not.toContain("RAW_FAILED_PAYLOAD_STDOUT");
     expect(serialized).not.toContain("RAW_FAILED_PAYLOAD_STDERR");
+    expect(serialized).not.toContain("RAW_PROMPT_SECRET_SENTINEL");
+    expect(serialized).not.toContain("MODEL_RUNNER_SOURCE_SENTINEL");
+    expect(serialized).not.toContain("SPOOFED_STDOUT_HASH_SENTINEL");
+    expect(serialized).not.toContain("SPOOFED_STDERR_HASH_SENTINEL");
     expect(result.details).toMatchObject({
       ok: false,
       partialRun: {
         finalResults: 1,
         failedRunResult: {
           modelCallFailure: {
+            ok: false,
+            requestId: "model-call-x",
+            error: { type: "child_process", code: "child_exit_nonzero", message: "child failed" },
             diagnostics: {
               stdout: "",
               stderr: "",
               stdoutBytes: Buffer.byteLength("RAW_FAILED_PAYLOAD_STDOUT", "utf8"),
+              stdoutSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
               stderrBytes: Buffer.byteLength("RAW_FAILED_PAYLOAD_STDERR", "utf8"),
+              stderrSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+              exitCode: 2,
             },
           },
         },
       },
+    });
+    const modelCallFailure = ((result.details.partialRun as Record<string, unknown>).failedRunResult as { modelCallFailure: Record<string, unknown> }).modelCallFailure;
+    expect(Object.keys(modelCallFailure).sort()).toEqual(["diagnostics", "error", "ok", "requestId"]);
+    expect(Object.keys(modelCallFailure.diagnostics as Record<string, unknown>).sort()).toEqual([
+      "exitCode",
+      "stderr",
+      "stderrBytes",
+      "stderrSha256",
+      "stdout",
+      "stdoutBytes",
+      "stdoutSha256",
+    ]);
+  });
+
+  it("reports the observed final-result count when a protocol error follows a final result", async () => {
+    const contextPath = await tempContextFile("duplicate final result context");
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import json, sys
+request = json.loads(sys.stdin.readline())
+result = {"type":"run_result","runId":request["runId"],"ok":True,"content":"first answer","modelCalls":0}
+print(json.dumps(result), flush=True)
+print(json.dumps(result), flush=True)
+`);
+
+    const result = await executeLambdaRlmTool({ contextPath, question: "What happened?" }, { bridgePath });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      runStatus: "runtime_failed",
+      error: { type: "protocol", code: "multiple_final_results" },
+      partialRun: { finalResults: 1 },
     });
   });
 

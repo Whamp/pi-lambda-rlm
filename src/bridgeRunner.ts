@@ -101,9 +101,10 @@ export class BridgeProtocolError extends Error {
     ok: false;
     error: { type: "protocol"; code: string; message: string; line?: string };
     diagnostics: { stderr: ReturnType<typeof summarizeTextDiagnostic>; stdout: ReturnType<typeof summarizeStdoutLines>; offendingLine?: ReturnType<typeof summarizeTextDiagnostic> };
+    finalResults?: number;
   };
 
-  constructor(code: string, message: string, diagnostics: { stderr: string; stdoutLines: string[]; line?: string }) {
+  constructor(code: string, message: string, diagnostics: { stderr: string; stdoutLines: string[]; line?: string; finalResults?: number }) {
     super(message);
     this.name = "BridgeProtocolError";
     this.details = {
@@ -114,6 +115,7 @@ export class BridgeProtocolError extends Error {
         stdout: summarizeStdoutLines(diagnostics.stdoutLines),
         ...(diagnostics.line ? { offendingLine: summarizeTextDiagnostic(diagnostics.line) } : {}),
       },
+      ...(diagnostics.finalResults !== undefined ? { finalResults: diagnostics.finalResults } : {}),
     };
   }
 }
@@ -150,7 +152,7 @@ export async function runSyntheticBridge(options: {
   let wholeRunTimeout: NodeJS.Timeout | undefined;
 
   function protocolError(code: string, message: string, line?: string): BridgeProtocolError {
-    return new BridgeProtocolError(code, message, { stderr, stdoutLines, ...(line ? { line } : {}) });
+    return new BridgeProtocolError(code, message, { stderr, stdoutLines, ...(line ? { line } : {}), finalResults: finalResults.length });
   }
 
   function runtimeFailure(code: string, message: string): BridgeRunFailedError {
@@ -164,6 +166,7 @@ export async function runSyntheticBridge(options: {
       },
       { stderr, stdoutLines },
       modelCallResponses,
+      finalResults.length,
     );
   }
 
