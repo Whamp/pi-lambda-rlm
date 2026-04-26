@@ -120,7 +120,7 @@ describe("lambda_rlm doctor diagnostics", () => {
       '# model = "<provider>/<model-id>"',
     );
     await expect(readFile(join(expectedWorkspacePath, "README.md"), "utf-8")).resolves.toContain(
-      "Add a `[leaf].model` entry manually",
+      "Run `/lambda-rlm-doctor` first",
     );
   });
 

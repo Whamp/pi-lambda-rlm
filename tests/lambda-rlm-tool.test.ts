@@ -872,6 +872,29 @@ print(json.dumps({"type":"run_result","runId":run_id,"ok":True,"content":respons
       runStatus: "validation_failed",
     });
     expect(firstContentText(result)).toContain("[leaf].model");
+    expect(firstContentText(result)).toContain("/lambda-rlm-doctor");
+  });
+
+  it("points invalid Lambda-RLM config failures toward doctor before execution", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "lambda-rlm-invalid-config-"));
+    const configDir = join(cwd, ".pi", "lambda-rlm");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, "config.toml"), '[leaf]\nmodel = ""\n', "utf-8");
+    const contextPath = join(cwd, "context.txt");
+    await writeFile(contextPath, "short source", "utf-8");
+
+    const result = await executeLambdaRlmTool(
+      { contextPath: "context.txt", question: "What?" },
+      { cwd },
+    );
+
+    expect(result.details).toMatchObject({
+      error: { code: "invalid_config_value", field: "leaf.model", type: "validation" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
+      ok: false,
+      runStatus: "validation_failed",
+    });
+    expect(firstContentText(result)).toContain("/lambda-rlm-doctor");
   });
 
   it("enforces resolved max input bytes from TOML config before starting the real bridge path", async () => {

@@ -34,7 +34,7 @@ After installing, start a new Pi session or run:
 
 ### 2. Inspect the Lambda-RLM User Workspace
 
-When the extension loads after install, Workspace Scaffolding creates `~/.pi/lambda-rlm/` if it is missing and shows a one-time Scaffold Notification. The scaffold is non-destructive: existing `config.toml`, `README.md`, Copied Example Fixtures, and prompt overlays are never overwritten.
+When the extension loads after install, Workspace Scaffolding creates `~/.pi/lambda-rlm/` if it is missing and shows a one-time Scaffold Notification. The scaffold is non-destructive: existing `config.toml`, `README.md`, Copied Example Fixtures, and prompt overlays are never overwritten. Copied Example Fixtures in `~/.pi/lambda-rlm/examples/` are user-owned onboarding files, not package-owned runtime defaults, so they are safe to edit, rename, or copy while you experiment.
 
 The generated `config.toml` is a Transparent Sparse Config Scaffold. It is valid TOML before model setup, keeps the Formal Leaf model commented so no billable model is auto-selected, and documents Run Control Policy defaults as comments instead of active copied overrides:
 
@@ -62,7 +62,7 @@ pi_executable = "pi"
 
 `lambda_rlm` services Lambda-RLM model callbacks by spawning constrained child Pi processes. Those child calls need an explicit Pi model. In interactive Pi sessions, run `/lambda-rlm-doctor`: after diagnostics, its Doctor Repair Flow can offer Formal Leaf Model Selection and prompt for a manual `provider/model-id` value.
 
-Write target behavior follows config precedence. If no distinct project `.pi/lambda-rlm/config.toml` exists, Formal Leaf Model Selection writes the global config at `~/.pi/lambda-rlm/config.toml` without asking for a target. If a project config exists, doctor prompts for Global Tool Configuration versus Project Tool Configuration. The highlighted default matches the effective owner of `[leaf].model`: project-local is highlighted when project config owns the effective model, otherwise global is highlighted while project-local remains available.
+Configuration Write Target behavior follows config precedence. If no distinct project `.pi/lambda-rlm/config.toml` exists, Formal Leaf Model Selection writes the global config at `~/.pi/lambda-rlm/config.toml` without asking for a target. If a project config exists, doctor prompts for Global Tool Configuration versus Project Tool Configuration. The highlighted default matches the effective owner of `[leaf].model`: project-local is highlighted when project config owns the effective model, otherwise global is highlighted while project-local remains available. Formal Leaf Thinking Selection uses the same Configuration Write Target prompt, and its highlighted default matches the effective owner of `[leaf].thinking`.
 
 Manual editing remains the fallback for non-interactive or diagnostic-only contexts. Add `[leaf].model` to the effective config file doctor reports, or to `~/.pi/lambda-rlm/config.toml` for global setup, using a model that already works in Pi:
 
@@ -130,9 +130,11 @@ The doctor defensively reruns Workspace Scaffolding to restore missing onboardin
 - Pi executable availability;
 - Formal Leaf command shape;
 - prompt overlays;
-- a deterministic mock bridge run that does not spend model credits.
+- a deterministic mock bridge run that does not spend real model credits.
 
-In interactive sessions, the doctor shows a post-diagnostics action menu. Formal Leaf Model Selection can prompt for a manual model pattern and update the selected config after diagnostics. Formal Leaf Thinking Selection is also available as secondary tuning for `[leaf].thinking` with the supported values `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`; thinking-only Targeted Config Edits do not require an automatic full diagnostic rerun. With no project config, model selection defaults to the global config without asking. When project config exists, it asks for a write target and highlights project-local when that project config owns the effective model. If the doctor reports invalid TOML/configuration, it reports code/field/source/path details before offering repair choices. The safe default is cancel, which leaves the file unchanged. If you explicitly confirm, doctor can create a backup and replace the exact invalid config file with a normalized scaffold; non-interactive Diagnostic-Only Doctor Mode never rewrites config. The model and thinking actions remain blocked while config is invalid. If the doctor reports a `leaf_model` error, use the model action or manually fix `[leaf].model`, Pi credentials, or `~/.pi/agent/models.json`, then rerun it.
+The default doctor diagnostics do not spend real model credits. Any real Formal Leaf smoke test is an explicit Doctor Command action that you choose, and it is not part of the default pass/fail readiness checks.
+
+In interactive sessions, the doctor shows a post-diagnostics action menu. Formal Leaf Model Selection can prompt for a manual model pattern and update the selected config after diagnostics. Formal Leaf Thinking Selection is also available as secondary tuning for `[leaf].thinking` with the supported values `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`; thinking-only Targeted Config Edits do not require an automatic full diagnostic rerun. With no project config, model and thinking selection default to the global config without asking. When project config exists, both actions ask for a write target and highlight project-local when that project config owns the effective `[leaf].model` or `[leaf].thinking` value for the selected action. If the doctor reports invalid TOML/configuration, it reports code/field/source/path details before offering repair choices. The safe default is cancel, which leaves the file unchanged. If you explicitly confirm, doctor can create a backup and replace the exact invalid config file with a normalized scaffold; non-interactive Diagnostic-Only Doctor Mode never rewrites config. The model and thinking actions remain blocked while config is invalid. If the doctor reports a `leaf_model` error, use the model action or manually fix `[leaf].model`, Pi credentials, or `~/.pi/agent/models.json`, then rerun it.
 
 ### 6. Use it naturally
 
@@ -347,9 +349,11 @@ A failed run marks the answer as non-authoritative. Validation failures happen b
 
 ## Troubleshooting
 
+Most setup failures should be diagnosed through `/lambda-rlm-doctor`. Model/config setup validation failures point to `/lambda-rlm-doctor` when the Lambda-RLM Tool cannot run because setup is incomplete.
+
 ### `/lambda-rlm-doctor` says `leaf_model` is missing
 
-Create or update `~/.pi/lambda-rlm/config.toml`:
+Run interactive `/lambda-rlm-doctor` and choose Formal Leaf Model Selection, or create/update `~/.pi/lambda-rlm/config.toml` manually:
 
 ```toml
 [leaf]
@@ -358,13 +362,25 @@ model = "<provider>/<model-id>"
 
 Use a model shown by `/model` or `pi --list-models`.
 
+### Invalid config or TOML
+
+If doctor reports invalid TOML, unknown keys, duplicate keys, or an invalid `[leaf]` value, fix the reported path/field and rerun `/lambda-rlm-doctor`. In interactive mode, doctor may offer an explicit backup-and-normalize repair for the invalid file. In non-interactive Diagnostic-Only Doctor Mode, it prints exact manual remediation and never mutates config.
+
 ### The model exists but doctor says credentials are missing
 
-Authenticate the provider with `/login`, an environment variable, or `~/.pi/agent/auth.json`.
+Authenticate the provider with `/login`, an environment variable, or `~/.pi/agent/auth.json`, then rerun `/lambda-rlm-doctor`.
 
-### A local model is not found
+### No credential-ready models
 
-Add it to `~/.pi/agent/models.json`, confirm `pi --model provider/model-id "hello"` works, then rerun `/lambda-rlm-doctor`.
+If doctor cannot find credential-ready Candidate Leaf Model Set entries, use `/login` for a cloud provider, add a local/custom provider to `~/.pi/agent/models.json`, or use manual Formal Leaf Model Selection with a model pattern you know Pi can run. Missing-auth models may be selectable only through an explicit expanded list and can still fail doctor until credentials are configured.
+
+### Local or custom models are not found
+
+Add the provider/model to `~/.pi/agent/models.json`, confirm `pi --model provider/model-id "hello"` works, then rerun `/lambda-rlm-doctor`.
+
+### Non-interactive remediation
+
+When Pi UI is unavailable, `/lambda-rlm-doctor` stays diagnostic-only: it reports readiness, config paths/source precedence, and manual snippets without prompts or writes. Apply the printed TOML or credential/model changes yourself, then rerun `/lambda-rlm-doctor`.
 
 ### Runs time out or spawn too many child processes
 
