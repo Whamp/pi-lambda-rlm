@@ -56,6 +56,12 @@ pi_executable = "pi"
 # whole_run_timeout_ms = 300000
 # model_call_timeout_ms = 60000
 # model_process_concurrency = 2
+
+[debug]
+# Enable compact source-free debug artifacts for every Lambda-RLM run.
+# enabled = true
+# Optional: override the default ~/.pi/lambda-rlm/runs location.
+# log_dir = "~/.pi/lambda-rlm/runs"
 ```
 
 ### 3. Configure the Formal Leaf model
@@ -231,6 +237,19 @@ Configuration resolves as sparse overlays in this order:
 4. per-run tightening from the tool call for supported `[run]` limits only.
 
 Project configuration is inside the project trust boundary, so it may override global defaults for that project. When `cwd` is the home directory and the global and project paths are the same `~/.pi/lambda-rlm/config.toml`, that file is treated as Global Tool Configuration only.
+
+### `[debug]` keys
+
+`[debug]` is the user-controlled way to capture compact run telemetry without relying on the agent to pass a tool parameter.
+
+| TOML key | Meaning |
+| --- | --- |
+| `enabled` | Boolean. Set `true` to write a compact source-free `debug.json` artifact for every Lambda-RLM run. Default: `false`. |
+| `log_dir` | Optional directory for debug artifacts. Default: `~/.pi/lambda-rlm/runs`. Relative paths resolve from the current project working directory. |
+
+Debug artifacts include run status, source metadata hashes/sizes, plan telemetry, model-call counts, and a bounded timeline. They do not include source contents, prompt bodies, or child process stdout/stderr bodies.
+
+### `[leaf]` keys
 
 ### `[leaf]` keys
 

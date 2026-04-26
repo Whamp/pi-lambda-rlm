@@ -43,7 +43,7 @@ describe("TOML run config resolver", () => {
     await expect(
       resolveLambdaRlmConfig({ cwd: dirs.project, homeDir: dirs.home }),
     ).resolves.toStrictEqual({
-      config: { leaf: DEFAULT_LEAF_CONFIG, run: DEFAULT_RUN_CONFIG },
+      config: { debug: { enabled: false }, leaf: DEFAULT_LEAF_CONFIG, run: DEFAULT_RUN_CONFIG },
       ok: true,
     });
   });
@@ -58,6 +58,7 @@ describe("TOML run config resolver", () => {
     ).resolves.toStrictEqual({
       config: {
         config: {
+          debug: { enabled: false },
           leaf: { ...DEFAULT_LEAF_CONFIG, model: "global/model" },
           run: DEFAULT_RUN_CONFIG,
         },
@@ -82,6 +83,29 @@ describe("TOML run config resolver", () => {
       config: {
         config: { leaf: { thinking: "high" } },
         sources: { leaf: { thinking: "project" } },
+      },
+      ok: true,
+    });
+  });
+
+  it("applies debug config overlays with project-over-global precedence", async () => {
+    const dirs = await tempConfigDirs();
+    await writeToml(
+      dirs.globalConfigPath,
+      ["[debug]", "enabled = true", 'log_dir = "/tmp/global-lambda-rlm-debug"'].join("\n"),
+    );
+    await writeToml(
+      dirs.projectConfigPath,
+      ["[debug]", 'log_dir = "relative-project-debug"'].join("\n"),
+    );
+
+    await expect(
+      resolveLambdaRlmConfig({ cwd: dirs.project, homeDir: dirs.home }),
+    ).resolves.toStrictEqual({
+      config: {
+        debug: { enabled: true, logDir: "relative-project-debug" },
+        leaf: DEFAULT_LEAF_CONFIG,
+        run: DEFAULT_RUN_CONFIG,
       },
       ok: true,
     });
@@ -137,6 +161,7 @@ describe("TOML run config resolver", () => {
       resolveLambdaRlmConfig({ cwd: dirs.project, homeDir: dirs.home }),
     ).resolves.toStrictEqual({
       config: {
+        debug: { enabled: false },
         leaf: { model: "local-vllm/qwen", piExecutable: "pi-dev", thinking: "off" },
         run: {
           maxInputBytes: 1000,
@@ -215,6 +240,8 @@ describe("TOML run config resolver", () => {
     ["unknown_key", "[run]\nmax_input_bytes = 100\nextra = 1\n", "unknown_config_key"],
     ["invalid_value", "[run]\nmax_input_bytes = 0\n", "invalid_config_value"],
     ["unknown_leaf_key", '[leaf]\nextra = "x"\n', "unknown_config_key"],
+    ["unknown_debug_key", "[debug]\nextra = true\n", "unknown_config_key"],
+    ["invalid_debug_enabled", '[debug]\nenabled = "yes"\n', "invalid_toml"],
     ["invalid_leaf_model", '[leaf]\nmodel = ""\n', "invalid_config_value"],
     ["invalid_leaf_thinking", '[leaf]\nthinking = "maximum"\n', "invalid_config_value"],
     ["unknown_table", "[prompt]\nfoo = 1\n", "unknown_config_key"],

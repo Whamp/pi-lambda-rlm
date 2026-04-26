@@ -5,7 +5,12 @@ import { fileURLToPath } from "node:url";
 import { BridgeProtocolError, BridgeRunFailedError, runSyntheticBridge } from "./bridge-runner.js";
 import type { BridgeProgressEvent, BridgeTimelineEvent, ModelCallRunner } from "./bridge-runner.js";
 import { resolveLambdaRlmConfig } from "./config-resolver.js";
-import type { ConfigValidationError, LeafConfig, RunConfig } from "./config-resolver.js";
+import type {
+  ConfigValidationError,
+  DebugConfig,
+  LeafConfig,
+  RunConfig,
+} from "./config-resolver.js";
 import { runFormalPiLeafModelCall } from "./leaf-runner.js";
 import type { LeafThinking, ProcessRunner } from "./leaf-runner.js";
 import { ModelCallConcurrencyQueue } from "./model-call-queue.js";
@@ -439,6 +444,7 @@ function assembleSourceContext(sources: LoadedSource[]) {
 type CompletedBridgeRun = Awaited<ReturnType<typeof runSyntheticBridge>>;
 
 interface RuntimeFormattingContext {
+  debugConfig: DebugConfig;
   leafModel: string;
   leafThinking: LeafThinking;
   outputOptions: OutputLimitOptions;
@@ -725,9 +731,19 @@ function debugError(error: BridgeRunFailedError | BridgeProtocolError) {
   };
 }
 
-function debugLogBaseDir(options: ExecuteLambdaRlmToolOptions) {
+function debugLogBaseDir(context: RuntimeFormattingContext, options: ExecuteLambdaRlmToolOptions) {
   if (options.debugLogDir) {
     return options.debugLogDir;
+  }
+  if (context.debugConfig.logDir) {
+    const homeDir = options.homeDir ?? process.env.HOME;
+    if (homeDir && context.debugConfig.logDir === "~") {
+      return homeDir;
+    }
+    if (homeDir && context.debugConfig.logDir.startsWith("~/")) {
+      return join(homeDir, context.debugConfig.logDir.slice(2));
+    }
+    return resolve(options.cwd ?? process.cwd(), context.debugConfig.logDir);
   }
   const homeDir = options.homeDir ?? process.env.HOME;
   return homeDir
@@ -745,7 +761,7 @@ async function writeDebugLog(args: {
   status: "runtime_failed" | "succeeded";
   timeline: BridgeTimelineEvent[];
 }) {
-  const runDir = join(debugLogBaseDir(args.options), args.context.runId);
+  const runDir = join(debugLogBaseDir(args.context, args.options), args.context.runId);
   await mkdir(runDir, { recursive: true });
   const debugLogPath = join(runDir, "debug.json");
   const artifact = {
@@ -852,7 +868,12 @@ async function resolveToolConfig(
             options.outputMaxVisibleChars,
           ),
         };
-  return { leafConfig: configResult.config.leaf, ok: true as const, runConfig };
+  return {
+    debugConfig: configResult.config.debug,
+    leafConfig: configResult.config.leaf,
+    ok: true as const,
+    runConfig,
+  };
 }
 
 async function resolveToolPrompts(options: ExecuteLambdaRlmToolOptions, cwd: string) {
@@ -964,6 +985,7 @@ function outputOptionsFor(
 }
 
 function runtimeContextFor(args: {
+  debugConfig: DebugConfig;
   leafModel: string;
   leafThinking: LeafThinking;
   outputOptions: OutputLimitOptions;
@@ -1086,7 +1108,7 @@ export async function executeLambdaRlmTool(
   if (!config.ok) {
     return config.result;
   }
-  const { leafConfig, runConfig } = config;
+  const { debugConfig, leafConfig, runConfig } = config;
 
   const prompts = await resolveToolPrompts(options, cwd);
   if (!prompts.ok) {
@@ -1135,6 +1157,7 @@ export async function executeLambdaRlmTool(
     });
   } catch (error) {
     const runtimeContext = runtimeContextFor({
+      debugConfig,
       leafModel,
       leafThinking,
       outputOptions,
@@ -1147,7 +1170,7 @@ export async function executeLambdaRlmTool(
     if (isBridgeRuntimeError(error)) {
       const debugLogPath = await debugLogPathForBridgeFailure({
         context: runtimeContext,
-        enabled: validated.debug,
+        enabled: debugConfig.enabled || validated.debug,
         error,
         options,
       });
@@ -1157,6 +1180,7 @@ export async function executeLambdaRlmTool(
   }
 
   const runtimeContext = runtimeContextFor({
+    debugConfig,
     leafModel,
     leafThinking,
     outputOptions,
@@ -1169,7 +1193,7 @@ export async function executeLambdaRlmTool(
   const debugLogPath = await debugLogPathForSuccessfulBridge({
     bridge,
     context: runtimeContext,
-    enabled: validated.debug,
+    enabled: debugConfig.enabled || validated.debug,
     options,
   });
   return formatSuccessResult({

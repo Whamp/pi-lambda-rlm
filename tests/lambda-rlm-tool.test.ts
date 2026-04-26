@@ -1080,6 +1080,50 @@ time.sleep(30)
     });
   });
 
+  it("writes a compact source-free debug artifact when debug is enabled in config", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-config-debug-"));
+    const cwd = join(root, "project");
+    const home = join(root, "home");
+    const debugLogDir = join(root, "configured-debug-logs");
+    await mkdir(join(home, ".pi", "lambda-rlm"), { recursive: true });
+    await mkdir(cwd, { recursive: true });
+    await writeFile(
+      join(home, ".pi", "lambda-rlm", "config.toml"),
+      ["[debug]", "enabled = true", `log_dir = "${debugLogDir}"`].join("\n"),
+      "utf-8",
+    );
+    const contextPath = await tempContextFile(
+      "SECRET_CONFIG_DEBUG_SOURCE_CONTENT should not appear in debug logs.",
+    );
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import json, sys
+request = json.loads(sys.stdin.readline())
+print(json.dumps({"type":"run_progress","runId":request["runId"],"phase":"planned","plan":{"taskType":"qa","composeOp":"select_relevant","useFilter":True,"kStar":2,"tauStar":100,"depth":1,"costEstimate":123,"n":456}}), flush=True)
+print(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"content":"configured debug answer","modelCalls":0}), flush=True)
+`);
+
+    const result = await executeLambdaRlmTool(
+      { contextPath, question: "Configured debug?" },
+      { bridgePath, cwd, homeDir: home },
+    );
+
+    expect(result.details).toMatchObject({
+      authoritativeAnswerAvailable: true,
+      debugLogPath: expect.stringContaining(debugLogDir),
+      ok: true,
+      runStatus: "succeeded",
+    });
+    expect(firstContentText(result)).toContain("Debug log:");
+
+    const { debugLogPath } = result.details;
+    if (typeof debugLogPath !== "string") {
+      throw new TypeError("Expected debugLogPath to be a string.");
+    }
+    const debugLogText = await readFile(debugLogPath, "utf-8");
+    expect(debugLogText).toContain("Configured debug?".length.toString());
+    expect(debugLogText).not.toContain("SECRET_CONFIG_DEBUG_SOURCE_CONTENT");
+  });
+
   it("writes a compact source-free debug artifact when debug mode is enabled for a successful run", async () => {
     const contextPath = await tempContextFile(
       "SECRET_SUCCESS_SOURCE_CONTENT should not appear in debug logs.",

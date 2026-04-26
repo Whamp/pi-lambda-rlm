@@ -11,5 +11,6 @@
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "extensions/**/*.ts", "benchmarks/**/*.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "extensions/**/*.ts", "benchmarks/**/*.ts"],
+  "exclude": ["benchmarks/context-rot/artifacts/**"]
 }

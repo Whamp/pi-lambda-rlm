@@ -290,7 +290,7 @@ describe("lambda_rlm Pi extension registration", () => {
       contextPaths:
         "Ordered paths to readable UTF-8 text files for one consolidated Lambda-RLM run. Pass exactly one of contextPath or contextPaths; do not inline, paste, or concatenate file contents yourself.",
       debug:
-        "Advanced diagnostics mode. When true, writes a compact source-free run timeline and telemetry artifact to disk for debugging successes, failures, and timeouts. Omit during normal use.",
+        "Advanced per-run diagnostics override. When true, writes a compact source-free run timeline and telemetry artifact to disk for this run. Users can enable this persistently with [debug].enabled in config.toml; omit during normal use.",
       maxInputBytes:
         "Caps the total UTF-8 bytes read from all referenced context files for this run. Advanced tightening only; cannot exceed the resolved config limit. Omit unless debugging or retrying after an input-limit failure.",
       maxModelCalls:
@@ -363,7 +363,7 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(tool.promptGuidelines).toStrictEqual([
       "Use lambda_rlm when the task requires long-context reasoning over one or more readable text files by path, especially for answering questions, summarizing, extracting facts, synthesizing across files, analyzing, or diagnosing from context that would waste or overflow parent-agent context if read directly.",
       "Call lambda_rlm with exactly one of contextPath or contextPaths plus question. Pass paths to readable text files only; do not pass inline source text, raw prompts, pasted file contents, URLs, or directories directly. Convert or pack other sources into readable text files first.",
-      "Set debug only when explicitly investigating a Lambda-RLM success, failure, or timeout; debug mode writes compact source-free run telemetry to disk and should be omitted during normal use.",
+      "Users can enable persistent debug telemetry with [debug].enabled in config.toml. Set the debug parameter only as a one-shot per-run override when explicitly investigating a Lambda-RLM success, failure, or timeout.",
       "Treat lambda_rlm as an Agent Context Avoidance boundary: it reads source files internally and returns a bounded answer rather than the source corpus.",
       "Expect a bounded answer plus compact run metadata. Do not ask lambda_rlm to return full source contents, large evidence packs, full execution traces, or citation dumps by default.",
       "If exact source verification is needed after lambda_rlm answers, use normal narrow follow-up tools such as read or rg on specific files or terms. Do not ask lambda_rlm to dump broad supporting context.",

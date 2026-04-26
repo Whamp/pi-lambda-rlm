@@ -12,6 +12,11 @@ export interface RunConfig {
   modelProcessConcurrency: number;
 }
 
+export interface DebugConfig {
+  enabled: boolean;
+  logDir?: string;
+}
+
 export type LeafThinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 export interface LeafConfig {
@@ -24,6 +29,7 @@ export interface LeafConfig {
 }
 
 export interface LambdaRlmConfig {
+  debug: DebugConfig;
   run: RunConfig;
   leaf: LeafConfig;
 }
@@ -69,9 +75,15 @@ export const DEFAULT_LEAF_CONFIG: LeafConfig = {
   thinking: "off",
 };
 
+export const DEFAULT_DEBUG_CONFIG: DebugConfig = {
+  enabled: false,
+};
+
 type RunOverlay = Partial<RunConfig>;
 type LeafOverlay = Partial<LeafConfig>;
+type DebugOverlay = Partial<DebugConfig>;
 interface LambdaRlmOverlay {
+  debug: DebugOverlay;
   run: RunOverlay;
   leaf: LeafOverlay;
 }
@@ -91,6 +103,11 @@ const TOML_TO_LEAF_CONFIG: Record<string, keyof LeafConfig> = {
   model: "model",
   pi_executable: "piExecutable",
   thinking: "thinking",
+};
+
+const TOML_TO_DEBUG_CONFIG: Record<string, keyof DebugConfig> = {
+  enabled: "enabled",
+  log_dir: "logDir",
 };
 
 const CONFIG_FIELDS = new Set<keyof RunConfig>([
@@ -157,6 +174,26 @@ function parseStringValue(raw: string, source: "global" | "project", lineNumber:
   return { ok: true as const, value: match[1] ?? "" };
 }
 
+function parseBooleanValue(
+  raw: string,
+  source: "global" | "project",
+  lineNumber: number,
+  field: string,
+) {
+  const trimmed = raw.trim();
+  if (trimmed !== "true" && trimmed !== "false") {
+    return {
+      error: validationError(
+        "invalid_toml",
+        `Invalid TOML syntax in ${source} config at line ${lineNumber}. Expected ${field} = true or false for [debug] values.`,
+        `debug.${field}`,
+      ),
+      ok: false as const,
+    };
+  }
+  return { ok: true as const, value: trimmed === "true" };
+}
+
 function parsePositiveIntegerValue(
   raw: string,
   source: "global" | "project",
@@ -214,6 +251,53 @@ function parseRunAssignment(args: {
   return { ok: true as const };
 }
 
+function parseDebugAssignment(args: {
+  key: string;
+  rawValue: string;
+  source: "global" | "project";
+  lineNumber: number;
+  overlay: LambdaRlmOverlay;
+}) {
+  const configKey = TOML_TO_DEBUG_CONFIG[args.key];
+  if (!configKey) {
+    return {
+      error: validationError(
+        "unknown_config_key",
+        `Unknown [debug] key ${args.key}. Supported keys: enabled, log_dir.`,
+        `debug.${args.key}`,
+      ),
+      ok: false as const,
+    };
+  }
+
+  if (configKey === "enabled") {
+    const parsed = parseBooleanValue(args.rawValue, args.source, args.lineNumber, args.key);
+    if (!parsed.ok) {
+      return parsed;
+    }
+    args.overlay.debug.enabled = parsed.value;
+    return { ok: true as const };
+  }
+
+  const parsed = parseStringValue(args.rawValue, args.source, args.lineNumber);
+  if (!parsed.ok) {
+    return parsed;
+  }
+  const value = parsed.value.trim();
+  if (!value) {
+    return {
+      error: validationError(
+        "invalid_config_value",
+        "[debug].log_dir must be a non-empty string.",
+        "debug.log_dir",
+      ),
+      ok: false as const,
+    };
+  }
+  args.overlay.debug.logDir = value;
+  return { ok: true as const };
+}
+
 function parseLeafAssignment(args: {
   key: string;
   rawValue: string;
@@ -266,8 +350,8 @@ export function parseConfigToml(
   toml: string,
   source: "global" | "project" = "global",
 ): { ok: true; overlay: LambdaRlmOverlay } | { ok: false; error: ConfigValidationError } {
-  const overlay: LambdaRlmOverlay = { leaf: {}, run: {} };
-  let table: "run" | "leaf" | undefined;
+  const overlay: LambdaRlmOverlay = { debug: {}, leaf: {}, run: {} };
+  let table: "run" | "leaf" | "debug" | undefined;
   const seenTables = new Set<string>();
   const seenKeys = new Set<string>();
   const lines = toml.split(/\r?\n/);
@@ -282,11 +366,11 @@ export function parseConfigToml(
     const tableMatch = /^\[([A-Za-z0-9_-]+)]$/.exec(line);
     if (tableMatch) {
       const [, tableName] = tableMatch;
-      if (tableName !== "run" && tableName !== "leaf") {
+      if (tableName !== "run" && tableName !== "leaf" && tableName !== "debug") {
         return {
           error: validationError(
             "unknown_config_key",
-            `Unknown TOML table [${tableName}] in ${source} config. Only [run] and [leaf] are supported.`,
+            `Unknown TOML table [${tableName}] in ${source} config. Only [run], [leaf], and [debug] are supported.`,
             `[${tableName}]`,
           ),
           ok: false,
@@ -312,7 +396,7 @@ export function parseConfigToml(
       return {
         error: validationError(
           "invalid_toml",
-          `Invalid TOML syntax in ${source} config at line ${lineNumber}. Expected [run], [leaf], or key = value.`,
+          `Invalid TOML syntax in ${source} config at line ${lineNumber}. Expected [run], [leaf], [debug], or key = value.`,
           `line ${lineNumber}`,
         ),
         ok: false,
@@ -322,7 +406,7 @@ export function parseConfigToml(
       return {
         error: validationError(
           "invalid_toml",
-          `Config key ${assignment[1]} must be inside a [run] or [leaf] table.`,
+          `Config key ${assignment[1]} must be inside a [run], [leaf], or [debug] table.`,
           assignment[1] ?? `line ${lineNumber}`,
         ),
         ok: false,
@@ -344,10 +428,18 @@ export function parseConfigToml(
     seenKeys.add(seenKey);
 
     const rawValue = assignment[2] ?? "";
-    const parsed =
-      table === "run"
-        ? parseRunAssignment({ key: tomlKey, lineNumber, overlay, rawValue, source })
-        : parseLeafAssignment({ key: tomlKey, lineNumber, overlay, rawValue, source });
+    const assignmentArgs = { key: tomlKey, lineNumber, overlay, rawValue, source };
+    let parsed:
+      | ReturnType<typeof parseRunAssignment>
+      | ReturnType<typeof parseLeafAssignment>
+      | ReturnType<typeof parseDebugAssignment>;
+    if (table === "run") {
+      parsed = parseRunAssignment(assignmentArgs);
+    } else if (table === "leaf") {
+      parsed = parseLeafAssignment(assignmentArgs);
+    } else {
+      parsed = parseDebugAssignment(assignmentArgs);
+    }
     if (!parsed.ok) {
       return parsed;
     }
@@ -358,6 +450,7 @@ export function parseConfigToml(
 
 function applyOverlay(base: LambdaRlmConfig, overlay: LambdaRlmOverlay): LambdaRlmConfig {
   return {
+    debug: { ...base.debug, ...overlay.debug },
     leaf: { ...base.leaf, ...overlay.leaf },
     run: { ...base.run, ...overlay.run },
   };
@@ -421,7 +514,11 @@ export async function resolveLambdaRlmConfigWithSources(
     paths: { global: globalConfigPath, project: projectConfigPath },
   };
 
-  let config: LambdaRlmConfig = { leaf: DEFAULT_LEAF_CONFIG, run: DEFAULT_RUN_CONFIG };
+  let config: LambdaRlmConfig = {
+    debug: DEFAULT_DEBUG_CONFIG,
+    leaf: DEFAULT_LEAF_CONFIG,
+    run: DEFAULT_RUN_CONFIG,
+  };
   const configLayers = [
     ["global", globalConfigPath],
     ...(resolve(projectConfigPath) === resolve(globalConfigPath)

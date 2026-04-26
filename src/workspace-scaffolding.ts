@@ -36,6 +36,12 @@ pi_executable = "pi"
 # whole_run_timeout_ms = 300000
 # model_call_timeout_ms = 60000
 # model_process_concurrency = 2
+
+[debug]
+# Enable compact source-free debug artifacts for every Lambda-RLM run.
+# enabled = true
+# Optional: override the default ~/.pi/lambda-rlm/runs location.
+# log_dir = "~/.pi/lambda-rlm/runs"
 `;
 
 const WORKSPACE_README = `# Lambda-RLM User Workspace
@@ -55,7 +61,7 @@ Next steps:
 
 ## Files
 
-- \`config.toml\` is a Transparent Sparse Config Scaffold. It is valid before model setup and intentionally leaves \`[leaf].model\` commented so Lambda-RLM never auto-selects a billable model.
+- \`config.toml\` is a Transparent Sparse Config Scaffold. It is valid before model setup, intentionally leaves \`[leaf].model\` commented so Lambda-RLM never auto-selects a billable model, and includes commented \`[debug]\` settings for opt-in source-free run artifacts.
 - \`examples/\` contains user-editable Copied Example Fixtures copied from the package examples. Missing examples may be restored, but existing files are never overwritten.
 - \`prompts/\` is not created automatically. Create sparse prompt overlays there only when you intentionally take ownership of prompt behavior.
 `;

@@ -295,7 +295,7 @@ async function configCheck(options: DoctorOptions, cwd: string) {
       ...(configResult.error.source ? { source: configResult.error.source } : {}),
       ...(configResult.error.path ? { path: configResult.error.path } : {}),
     },
-    "Fix ~/.pi/lambda-rlm/config.toml or <project>/.pi/lambda-rlm/config.toml; use [leaf] string keys and positive integer [run] keys only.",
+    "Fix ~/.pi/lambda-rlm/config.toml or <project>/.pi/lambda-rlm/config.toml; use [leaf] string keys, positive integer [run] keys, and boolean/string [debug] keys only.",
   );
 }
 
