@@ -7,7 +7,7 @@ import {
 } from "./leaf-runner.js";
 import type { Awaitable, ProcessRunner } from "./leaf-runner.js";
 import { resolvePromptBundle } from "./prompt-resolver.js";
-import { resolveLambdaRlmConfig } from "./config-resolver.js";
+import { resolveLambdaRlmConfig, resolveLambdaRlmConfigWithSources } from "./config-resolver.js";
 import { runSyntheticBridge } from "./bridge-runner.js";
 import { ensureLambdaRlmUserWorkspace } from "./workspace-scaffolding.js";
 
@@ -303,6 +303,16 @@ function splitProviderModel(modelPattern: string) {
   return { modelId: modelPattern.slice(slash + 1), provider: modelPattern.slice(0, slash) };
 }
 
+function configSourceLabel(source: string) {
+  if (source === "project") {
+    return "Project Tool Configuration";
+  }
+  if (source === "global") {
+    return "Global Tool Configuration";
+  }
+  return "built-in defaults";
+}
+
 function registryModelCheck(modelPattern: string, modelRegistry: MinimalModelRegistry | undefined) {
   if (!modelRegistry?.find || !modelRegistry.hasConfiguredAuth) {
     return;
@@ -340,7 +350,12 @@ function registryModelCheck(modelPattern: string, modelRegistry: MinimalModelReg
 }
 
 async function leafModelCheck(options: DoctorOptions, cwd: string) {
-  const configResult = await resolvedConfigForDoctor(options, cwd);
+  const configResult = await resolveLambdaRlmConfigWithSources({
+    cwd,
+    ...(options.homeDir ? { homeDir: options.homeDir } : {}),
+    ...(options.globalConfigPath ? { globalConfigPath: options.globalConfigPath } : {}),
+    ...(options.projectConfigPath ? { projectConfigPath: options.projectConfigPath } : {}),
+  });
   if (!configResult.ok) {
     return check(
       "leaf_model",
@@ -350,16 +365,24 @@ async function leafModelCheck(options: DoctorOptions, cwd: string) {
       "Fix ~/.pi/lambda-rlm/config.toml or <project>/.pi/lambda-rlm/config.toml, then rerun /lambda-rlm-doctor.",
     );
   }
-  const configuredModel = configResult.config.leaf.model;
+  const configuredModel = configResult.config.config.leaf.model;
   if (configuredModel) {
     const registryCheck = registryModelCheck(configuredModel, options.modelRegistry);
     if (registryCheck) {
       return registryCheck;
     }
-    return check("leaf_model", "ok", `Formal Leaf model is configured: ${configuredModel}.`, {
-      leafModel: configuredModel,
-      source: "config",
-    });
+    const source = configResult.config.sources.leaf.model;
+    const sourceLabel = configSourceLabel(source);
+    return check(
+      "leaf_model",
+      "ok",
+      `Formal Leaf model is configured: ${configuredModel}. Effective Formal Leaf Model Selection comes from ${sourceLabel}.`,
+      {
+        leafModel: configuredModel,
+        paths: configResult.config.sources.paths,
+        source,
+      },
+    );
   }
 
   const envModel = envLeafModel(options);
