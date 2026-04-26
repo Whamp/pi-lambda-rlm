@@ -139,11 +139,11 @@ describe("prompt overlay resolver", () => {
     const homeDir = await tempRoot("lambda-rlm-home-");
     const cwd = await tempRoot("lambda-rlm-cwd-");
 
+    await expect(stat("extensions/lambda-rlm/prompt-templates/tasks/qa.md")).resolves.toMatchObject(
+      {},
+    );
     await expect(
-      stat(".pi/extensions/lambda-rlm/prompt-templates/tasks/qa.md"),
-    ).resolves.toMatchObject({});
-    await expect(
-      stat(".pi/extensions/lambda-rlm/prompt-templates/FORMAL-LEAF-SYSTEM-PROMPT.md"),
+      stat("extensions/lambda-rlm/prompt-templates/FORMAL-LEAF-SYSTEM-PROMPT.md"),
     ).resolves.toMatchObject({});
 
     const result = await resolvePromptBundle({ cwd, homeDir });

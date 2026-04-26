@@ -1,21 +1,27 @@
 # pi-lambda-rlm agent notes
 
-## Project-local extension auto-load
+## Local development extension loading
 
-This repo intentionally dogfoods `lambda_rlm` through a project-local Pi extension entrypoint:
+This repo uses Pi's local-path package install flow for dogfooding and development:
 
-```text
-.pi/extensions/lambda-rlm/index.ts
+```bash
+pi install /home/will/projects/pi-lambda-rlm/
 ```
 
-When a Pi coding agent starts with its working directory in this repo, Pi auto-discovers `.pi/extensions/*/index.ts` and registers `lambda_rlm` before the first model/provider request. This happens even when the extension is not installed globally.
+The package manifest points at this extension entrypoint:
+
+```text
+extensions/lambda-rlm/index.ts
+```
+
+Runtime assets such as `bridge.py`, `prompts/`, `prompt-templates/`, and `rlm/` live under `extensions/lambda-rlm/` and are tracked repo files.
 
 Consequences for agents:
 
-- Treat `lambda_rlm` as active in this repo after startup, `/reload`, or restart.
-- A schema or load error in `lambda_rlm` can break unrelated agent prompts before the tool is ever called, because tool schemas are sent to the provider as part of the request.
-- The entrypoint is not a symlink. It re-exports `src/extension.ts`; runtime assets such as `bridge.py`, `prompts/`, `prompt-templates/`, and `rlm/` live under `.pi/extensions/lambda-rlm/` and are tracked repo files.
-- After editing extension code, run `/reload` in Pi or restart the Pi session to pick up changes.
-- To bypass the dogfooded extension while debugging unrelated work, start Pi with extensions disabled or temporarily rename `.pi/extensions/lambda-rlm/`.
+- Treat `lambda_rlm` as active only when this package is installed in Pi settings or explicitly loaded with `-e`.
+- This checkout intentionally does **not** provide a `.pi/extensions/lambda-rlm/` project-local auto-discovery entrypoint. Starting Pi in this repo should not auto-load the extension merely because of cwd.
+- After editing extension code or runtime assets, run `/reload` in Pi or restart the Pi session to pick up changes from the local-path install.
+- A schema or load error in `lambda_rlm` can still break prompts in sessions where the package is installed, because tool schemas are sent to the provider as part of the request.
+- To bypass the installed extension while debugging unrelated work, remove or disable the local package install in Pi settings, start Pi with extensions disabled, or use a session where the package is not installed.
 
 Provider compatibility rule: keep public tool parameter schemas as a top-level object without top-level `oneOf`, `anyOf`, `allOf`, `enum`, or `not`. Enforce conditional rules such as “exactly one of `contextPath` or `contextPaths`” in runtime validation instead.

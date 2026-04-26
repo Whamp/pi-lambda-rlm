@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 export interface RunConfig {
   maxInputBytes: number;
@@ -33,11 +33,26 @@ export interface ConfigValidationError {
   code: string;
   message: string;
   field: string;
+  path?: string;
+  source?: "global" | "project";
 }
 
 export type ConfigResult<T = RunConfig> =
   | { ok: true; config: T }
   | { ok: false; error: ConfigValidationError };
+
+export type ConfigSource = "default" | "global" | "project";
+
+export interface LambdaRlmConfigSourceReport {
+  paths: { global: string; project: string };
+  exists: { global: boolean; project: boolean };
+  leaf: { model: ConfigSource; thinking: ConfigSource };
+}
+
+export type ConfigWithSourcesResult = ConfigResult<{
+  config: LambdaRlmConfig;
+  sources: LambdaRlmConfigSourceReport;
+}>;
 
 export const DEFAULT_RUN_CONFIG: RunConfig = {
   maxInputBytes: 1_200_000,
@@ -88,17 +103,27 @@ const CONFIG_FIELDS = new Set<keyof RunConfig>([
   "modelProcessConcurrency",
 ]);
 
-const LEAF_THINKING_VALUES = new Set<LeafThinking>([
+export const LEAF_THINKING_VALUES = [
   "off",
   "minimal",
   "low",
   "medium",
   "high",
   "xhigh",
-]);
+] as const satisfies readonly LeafThinking[];
+
+export const LEAF_THINKING_VALUE_SET = new Set<LeafThinking>(LEAF_THINKING_VALUES);
 
 function validationError(code: string, message: string, field: string): ConfigValidationError {
   return { code, field, message, type: "validation" };
+}
+
+function configFileValidationError(
+  error: ConfigValidationError,
+  source: "global" | "project",
+  path: string,
+): ConfigValidationError {
+  return { ...error, path, source };
 }
 
 async function readOptional(path: string): Promise<string | undefined> {
@@ -223,7 +248,7 @@ function parseLeafAssignment(args: {
       ok: false as const,
     };
   }
-  if (configKey === "thinking" && !LEAF_THINKING_VALUES.has(value as LeafThinking)) {
+  if (configKey === "thinking" && !LEAF_THINKING_VALUE_SET.has(value as LeafThinking)) {
     return {
       error: validationError(
         "invalid_config_value",
@@ -365,7 +390,21 @@ function normalizePerRun(
   return { ok: true, perRun: out };
 }
 
-export async function resolveLambdaRlmConfig(
+function configPaths(args: {
+  cwd?: string;
+  homeDir?: string;
+  globalConfigPath?: string;
+  projectConfigPath?: string;
+}) {
+  const cwd = args.cwd ?? process.cwd();
+  const homeDir = args.homeDir ?? homedir();
+  return {
+    globalConfigPath: args.globalConfigPath ?? join(homeDir, ".pi", "lambda-rlm", "config.toml"),
+    projectConfigPath: args.projectConfigPath ?? join(cwd, ".pi", "lambda-rlm", "config.toml"),
+  };
+}
+
+export async function resolveLambdaRlmConfigWithSources(
   args: {
     cwd?: string;
     homeDir?: string;
@@ -373,25 +412,38 @@ export async function resolveLambdaRlmConfig(
     projectConfigPath?: string;
     perRun?: Record<string, unknown>;
   } = {},
-): Promise<ConfigResult<LambdaRlmConfig>> {
-  const cwd = args.cwd ?? process.cwd();
-  const homeDir = args.homeDir ?? homedir();
-  const globalConfigPath =
-    args.globalConfigPath ?? join(homeDir, ".pi", "lambda-rlm", "config.toml");
-  const projectConfigPath = args.projectConfigPath ?? join(cwd, ".pi", "lambda-rlm", "config.toml");
+): Promise<ConfigWithSourcesResult> {
+  const { globalConfigPath, projectConfigPath } = configPaths(args);
+  const exists = { global: false, project: false };
+  const sources: LambdaRlmConfigSourceReport = {
+    exists,
+    leaf: { model: "default", thinking: "default" },
+    paths: { global: globalConfigPath, project: projectConfigPath },
+  };
 
   let config: LambdaRlmConfig = { leaf: DEFAULT_LEAF_CONFIG, run: DEFAULT_RUN_CONFIG };
-  for (const [source, path] of [
+  const configLayers = [
     ["global", globalConfigPath],
-    ["project", projectConfigPath],
-  ] as const) {
+    ...(resolve(projectConfigPath) === resolve(globalConfigPath)
+      ? []
+      : [["project", projectConfigPath] as const]),
+  ] as const;
+
+  for (const [source, path] of configLayers) {
     const text = await readOptional(path);
     if (text === undefined) {
       continue;
     }
+    exists[source] = true;
     const parsed = parseConfigToml(text, source);
     if (!parsed.ok) {
-      return parsed;
+      return { error: configFileValidationError(parsed.error, source, path), ok: false };
+    }
+    if (parsed.overlay.leaf.model) {
+      sources.leaf.model = source;
+    }
+    if (parsed.overlay.leaf.thinking) {
+      sources.leaf.thinking = source;
     }
     config = applyOverlay(config, parsed.overlay);
   }
@@ -414,7 +466,23 @@ export async function resolveLambdaRlmConfig(
     config = { ...config, run: { ...config.run, [field]: value } };
   }
 
-  return { config, ok: true };
+  return { config: { config, sources }, ok: true };
+}
+
+export async function resolveLambdaRlmConfig(
+  args: {
+    cwd?: string;
+    homeDir?: string;
+    globalConfigPath?: string;
+    projectConfigPath?: string;
+    perRun?: Record<string, unknown>;
+  } = {},
+): Promise<ConfigResult<LambdaRlmConfig>> {
+  const result = await resolveLambdaRlmConfigWithSources(args);
+  if (!result.ok) {
+    return result;
+  }
+  return { config: result.config.config, ok: true };
 }
 
 export async function resolveRunConfig(

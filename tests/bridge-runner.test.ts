@@ -8,9 +8,7 @@ import { describe, expect, it } from "vitest";
 import type { BridgeProtocolError } from "../src/bridge-runner.js";
 import { runSyntheticBridge } from "../src/bridge-runner.js";
 
-const bridgePath = fileURLToPath(
-  new URL("../.pi/extensions/lambda-rlm/bridge.py", import.meta.url),
-);
+const bridgePath = fileURLToPath(new URL("../extensions/lambda-rlm/bridge.py", import.meta.url));
 
 async function tempContextFile(content: string) {
   const dir = await mkdtemp(join(tmpdir(), "lambda-rlm-bridge-test-"));

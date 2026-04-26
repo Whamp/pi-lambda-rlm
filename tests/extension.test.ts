@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import registerLambdaRlmExtension from "../src/extension.js";
-import registerLambdaRlmEntrypoint from "../.pi/extensions/lambda-rlm/index.js";
+import registerLambdaRlmEntrypoint from "../extensions/lambda-rlm/index.js";
 import type { ProcessInvocation, ProcessResult } from "../src/leaf-runner.js";
 
 interface ToolContent {
@@ -47,9 +47,27 @@ interface RegisteredCommand {
     description: string;
     handler: (context: {
       cwd: string;
-      ui?: { notify?: (message: string) => void | Promise<void> };
+      leafProcessRunner?: (invocation: ProcessInvocation) => ProcessResult | Promise<ProcessResult>;
+      modelRegistry?: {
+        registeredModels?: unknown[];
+        scopedModelPatterns?: string[];
+      };
+      ui?: {
+        notify?: (message: string) => void | Promise<void>;
+        promptText?: (prompt: string) => string | Promise<string>;
+        select?: (
+          prompt: string,
+          choices: { id: string }[],
+          defaultChoiceId?: string,
+        ) => string | Promise<string>;
+      };
     }) => Promise<ToolResult>;
   };
+}
+
+interface RegistrationOptions {
+  notify?: (message: string) => void | Promise<void>;
+  workspacePath?: string;
 }
 
 const FORBIDDEN_TOP_LEVEL_SCHEMA_KEYS = ["oneOf", "anyOf", "allOf", "enum", "not"] as const;
@@ -82,9 +100,29 @@ function firstContentText(result: ToolResult) {
   return content.text;
 }
 
-function registeredTools(register: typeof registerLambdaRlmExtension = registerLambdaRlmExtension) {
+const okDoctorRunner = (invocation: ProcessInvocation): ProcessResult => {
+  if (invocation.args.includes("--version")) {
+    return { exitCode: 0, stderr: "", stdout: `${invocation.command} test version` };
+  }
+  return {
+    exitCode: 0,
+    stderr: "",
+    stdout: JSON.stringify({
+      missing: [],
+      ok: true,
+      seams: ["LambdaRLM.client", "LambdaPromptRegistry", "completion_with_metadata path"],
+    }),
+  };
+};
+
+function registeredTools(
+  register: typeof registerLambdaRlmExtension = registerLambdaRlmExtension,
+  options: RegistrationOptions = {},
+) {
   const tools: RegisteredTool[] = [];
   register({
+    ...(options.notify ? { ui: { notify: options.notify } } : {}),
+    ...(options.workspacePath ? { lambdaRlmWorkspacePath: options.workspacePath } : {}),
     registerTool: (tool: Record<string, unknown>) => tools.push(tool as unknown as RegisteredTool),
   });
   return tools;
@@ -152,11 +190,14 @@ function schemaCompatibilityProblems(tool: RegisteredTool): string[] {
 
 function registeredLambdaRlmCommand(
   register: typeof registerLambdaRlmExtension = registerLambdaRlmExtension,
+  options: RegistrationOptions = {},
 ) {
   const commands: RegisteredCommand[] = [];
   register({
-    registerCommand: (name, options) =>
-      commands.push({ name, options: options as unknown as RegisteredCommand["options"] }),
+    ...(options.notify ? { ui: { notify: options.notify } } : {}),
+    ...(options.workspacePath ? { lambdaRlmWorkspacePath: options.workspacePath } : {}),
+    registerCommand: (name, commandOptions) =>
+      commands.push({ name, options: commandOptions as unknown as RegisteredCommand["options"] }),
     registerTool: () => {
       // Command-only registration test.
     },
@@ -168,6 +209,49 @@ function registeredLambdaRlmCommand(
   return command;
 }
 describe("lambda_rlm Pi extension registration", () => {
+  it("scaffolds the Lambda-RLM User Workspace on extension load and emits Scaffold Notification only on first creation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-workspace-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const notifications: string[] = [];
+
+    registeredTools(registerLambdaRlmExtension, {
+      workspacePath,
+      notify: (message) => {
+        notifications.push(message);
+      },
+    });
+    await Promise.resolve();
+
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      "# model =",
+    );
+    await expect(readFile(join(workspacePath, "README.md"), "utf-8")).resolves.toContain(
+      "Lambda-RLM User Workspace",
+    );
+    await expect(
+      readFile(join(workspacePath, "examples", "single-file-qa", "context.md"), "utf-8"),
+    ).resolves.toContain("context budget");
+    expect(notifications).toStrictEqual([expect.stringContaining("Lambda-RLM User Workspace")]);
+
+    registeredTools(registerLambdaRlmExtension, {
+      workspacePath,
+      notify: (message) => {
+        notifications.push(message);
+      },
+    });
+    await Promise.resolve();
+
+    expect(notifications).toHaveLength(1);
+  });
+
+  it("describes the doctor command as non-destructive workspace-ensuring diagnostics", () => {
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension);
+
+    expect(command.options.description).toMatch(/non-destructive/i);
+    expect(command.options.description).toMatch(/workspace-ensuring/i);
+    expect(command.options.description).not.toMatch(/non-mutating/i);
+  });
+
   it("registers a lambda_rlm tool with a strict path-based schema and optional per-run tightening", () => {
     const tool = registeredLambdaRlmTool();
 
@@ -206,7 +290,7 @@ describe("lambda_rlm Pi extension registration", () => {
     const registrations = [
       { source: "src/extension.ts", tools: registeredTools(registerLambdaRlmExtension) },
       {
-        source: ".pi/extensions/lambda-rlm/index.ts",
+        source: "extensions/lambda-rlm/index.ts",
         tools: registeredTools(registerLambdaRlmEntrypoint),
       },
     ];
@@ -348,13 +432,13 @@ describe("lambda_rlm Pi extension registration", () => {
     });
   });
 
-  it("registers a non-mutating doctor command with Pi's two-argument command API", () => {
+  it("registers a non-destructive doctor command with Pi's two-argument command API", () => {
     const command = registeredLambdaRlmCommand();
 
     expect(command).toBeTruthy();
     expect(command.name).toBe("lambda-rlm-doctor");
     expect(command.name).not.toMatch(/^\//);
-    expect(command.options.description).toMatch(/non-mutating/i);
+    expect(command.options.description).toMatch(/non-destructive/i);
     expect(command.options.description).toMatch(/Python|config|prompts|mock bridge/i);
     expect(command.options.handler).toStrictEqual(expect.any(Function));
   });
@@ -374,9 +458,793 @@ describe("lambda_rlm Pi extension registration", () => {
 
     const text = firstContentText(result);
     expect(text).toMatch(/lambda_rlm doctor (passed|found errors)/);
-    const details = result.details as { checks: { name: string }[] };
+    expect(text).toContain("Diagnostics:");
+    expect(text).toContain("Post-diagnostics action menu");
+    const details = result.details as { actions: unknown; checks: { name: string }[] };
     expect(details.checks.map((check) => check.name)).toContain("mock_bridge");
-    expect(notifications).toStrictEqual([text]);
+    expect(details.actions).toBeTruthy();
+    expect(notifications).toStrictEqual([text.split("\n", 1)[0]]);
+  });
+
+  it("runs non-interactive doctor as diagnostic-only output without UI prompts or repair-flow actions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-noninteractive-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+
+    const result = await command.options.handler({ cwd: root });
+
+    const text = firstContentText(result);
+    expect(text).toContain("Diagnostic-Only Doctor Mode");
+    expect(text).not.toContain("Post-diagnostics action menu");
+    expect(text).toContain('[leaf]\nmodel = "<provider>/<model-id>"');
+    expect(result.details).toMatchObject({ mode: "diagnostic-only" });
+    expect(result.details).not.toHaveProperty("actions");
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      '# model = "<provider>/<model-id>"',
+    );
+  });
+
+  it("uses a scoped-model-aware Formal Leaf model picker before writing the selected model", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-scoped-picker-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      modelRegistry: {
+        registeredModels: [
+          { credentialReady: true, id: "google/gemini" },
+          { credentialReady: true, id: "anthropic/claude" },
+        ],
+        scopedModelPatterns: ["anthropic/claude"],
+      },
+      ui: {
+        promptText: () => {
+          throw new Error("manual entry should not be needed for a selected candidate");
+        },
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return selections.length === 1 ? "select_formal_leaf_model" : "anthropic/claude";
+        },
+      },
+    });
+
+    expect(selections[1]).toContain("Candidate Leaf Model Set");
+    expect(selections[1]).toContain(":anthropic/claude:");
+    expect(selections[1]).toContain("anthropic/claude,google/gemini");
+    expect(selections[1]).toContain("__manual_formal_leaf_model__");
+    expect(selections[1]).toContain("__show_all_registered_formal_leaf_models__");
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'model = "anthropic/claude"',
+    );
+    expect(result.details).toMatchObject({ modelWrite: { model: "anthropic/claude" } });
+  });
+
+  it("lets a secondary picker action show all registered models and warns for missing-auth selections", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-expanded-picker-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const notifications: string[] = [];
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      modelRegistry: {
+        registeredModels: [
+          { credentialReady: true, id: "google/gemini" },
+          { credentialReady: false, id: "local/qwen" },
+        ],
+      },
+      ui: {
+        notify: (message) => {
+          notifications.push(message);
+        },
+        promptText: () => "unused/manual",
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          if (selections.length === 1) {
+            return "select_formal_leaf_model";
+          }
+          if (selections.length === 2) {
+            return "__show_all_registered_formal_leaf_models__";
+          }
+          return "local/qwen";
+        },
+      },
+    });
+
+    expect(selections[2]).toContain("all registered models");
+    expect(selections[2]).toContain("local/qwen");
+    expect(notifications).toContainEqual(expect.stringContaining("Missing auth"));
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'model = "local/qwen"',
+    );
+    expect(result.details).toMatchObject({ modelWrite: { model: "local/qwen" } });
+  });
+
+  it("shows next actions instead of an empty picker when no credential-ready models exist", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-no-ready-picker-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const notifications: string[] = [];
+    const selections: string[] = [];
+    const prompts: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      modelRegistry: {
+        registeredModels: [{ credentialReady: false, id: "local/qwen" }],
+        scopedModelPatterns: ["local/qwen"],
+      },
+      ui: {
+        notify: (message) => {
+          notifications.push(message);
+        },
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "manual/provider";
+        },
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return selections.length === 1
+            ? "select_formal_leaf_model"
+            : "__manual_formal_leaf_model__";
+        },
+      },
+    });
+
+    expect(notifications).toContainEqual(expect.stringContaining("No credential-ready models"));
+    expect(notifications).toContainEqual(expect.stringContaining("/login"));
+    expect(selections[1]).toContain("__manual_formal_leaf_model__");
+    expect(prompts).toContainEqual(expect.stringContaining("manual Formal Leaf model"));
+    expect(result.details).toMatchObject({ modelWrite: { model: "manual/provider" } });
+  });
+
+  it("routes an available-but-empty registry through no-ready model guidance before manual entry", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-empty-registry-picker-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const notifications: string[] = [];
+    const selections: string[] = [];
+    const prompts: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      modelRegistry: { registeredModels: [] },
+      ui: {
+        notify: (message) => {
+          notifications.push(message);
+        },
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "manual/provider";
+        },
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return selections.length === 1
+            ? "select_formal_leaf_model"
+            : "__manual_formal_leaf_model__";
+        },
+      },
+    });
+
+    expect(notifications).toContainEqual(expect.stringContaining("No credential-ready models"));
+    expect(selections[1]).toContain("Candidate Leaf Model Set");
+    expect(selections[1]).toContain("__manual_formal_leaf_model__");
+    expect(prompts).toContainEqual(expect.stringContaining("manual Formal Leaf model"));
+    expect(result.details).toMatchObject({ modelWrite: { model: "manual/provider" } });
+  });
+
+  it("supports Formal Leaf Thinking Selection with supported values and no required diagnostics rerun", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-thinking-flow-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return selections.length === 1 ? "change_formal_leaf_thinking" : "high";
+        },
+      },
+    });
+
+    expect(selections[0]).toContain("change_formal_leaf_thinking");
+    expect(selections[1]).toContain("Formal Leaf Thinking Selection");
+    expect(selections[1]).toContain(":off:");
+    expect(selections[1]).toContain("off,minimal,low,medium,high,xhigh");
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'thinking = "high"',
+    );
+    const text = firstContentText(result);
+    expect(text).toContain("Formal Leaf Thinking Selection wrote high");
+    expect(text).toContain("no automatic full diagnostic rerun was required");
+    expect(text.match(/Diagnostics:/g)).toHaveLength(1);
+    expect(result.details).toMatchObject({ thinkingWrite: { thinking: "high", target: "global" } });
+    expect(result.details).not.toHaveProperty("rerun");
+  });
+
+  it("prompts for a Configuration Write Target when project config owns effective thinking and avoids rerun", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-thinking-target-"));
+    const workspacePath = join(root, "home", ".pi", "lambda-rlm");
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(workspacePath, { recursive: true });
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(join(workspacePath, "config.toml"), '[leaf]\nthinking = "low"\n', "utf-8");
+    await writeFile(projectConfigPath, '[leaf]\nthinking = "off"\n', "utf-8");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          if (selections.length === 1) {
+            return "change_formal_leaf_thinking";
+          }
+          if (selections.length === 2) {
+            return "high";
+          }
+          return "project";
+        },
+      },
+    });
+
+    expect(selections[2]).toContain("Configuration Write Target");
+    expect(selections[2]).toContain(":project:");
+    await expect(readFile(projectConfigPath, "utf-8")).resolves.toContain('thinking = "high"');
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'thinking = "low"',
+    );
+    expect(firstContentText(result)).toContain("Project Tool Configuration");
+    expect(firstContentText(result).match(/Diagnostics:/g)).toHaveLength(1);
+    expect(result.details).toMatchObject({ thinkingWrite: { target: "project" } });
+    expect(result.details).not.toHaveProperty("rerun");
+  });
+
+  it("defaults the thinking Configuration Write Target to global when project config does not own effective thinking", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-thinking-global-target-"));
+    const workspacePath = join(root, "home", ".pi", "lambda-rlm");
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(workspacePath, { recursive: true });
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(join(workspacePath, "config.toml"), '[leaf]\nthinking = "low"\n', "utf-8");
+    await writeFile(projectConfigPath, "[run]\nmax_model_calls = 99\n", "utf-8");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          if (selections.length === 1) {
+            return "change_formal_leaf_thinking";
+          }
+          if (selections.length === 2) {
+            return "high";
+          }
+          return "global";
+        },
+      },
+    });
+
+    expect(selections[2]).toContain("Configuration Write Target");
+    expect(selections[2]).toContain(":global:");
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'thinking = "high"',
+    );
+    await expect(readFile(projectConfigPath, "utf-8")).resolves.toContain("max_model_calls = 99");
+    await expect(readFile(projectConfigPath, "utf-8")).resolves.not.toContain("high");
+    expect(firstContentText(result)).toContain("Global Tool Configuration");
+    expect(result.details).toMatchObject({ thinkingWrite: { target: "global" } });
+    expect(result.details).not.toHaveProperty("rerun");
+  });
+
+  it("supports in-flow manual Formal Leaf model entry, writes the global config by default, and reruns diagnostics", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-model-flow-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const selections: string[] = [];
+    const prompts: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "local/qwen";
+        },
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return "select_formal_leaf_model";
+        },
+      },
+    });
+
+    const text = firstContentText(result);
+    expect(selections).toHaveLength(1);
+    expect(selections[0]).toContain("select_formal_leaf_model");
+    expect(prompts[0]).toMatch(/manual Formal Leaf model/i);
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'model = "local/qwen"',
+    );
+    expect(text).toContain(
+      "Formal Leaf Model Selection wrote local/qwen to Global Tool Configuration",
+    );
+    expect(text.match(/Diagnostics:/g)).toHaveLength(2);
+    expect(result.details).toMatchObject({
+      modelWrite: { model: "local/qwen", target: "global" },
+      rerun: { ok: true },
+    });
+  });
+
+  it("prompts for a Configuration Write Target when project config exists and defaults to project-local when it owns the effective model", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-project-target-"));
+    const workspacePath = join(root, "home", ".pi", "lambda-rlm");
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(workspacePath, { recursive: true });
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(join(workspacePath, "config.toml"), '[leaf]\nmodel = "global/old"\n', "utf-8");
+    await writeFile(projectConfigPath, '[leaf]\nmodel = "project/old"\n', "utf-8");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        promptText: () => "project/new",
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return selections.length === 1 ? "select_formal_leaf_model" : "project";
+        },
+      },
+    });
+
+    expect(selections[1]).toContain("Configuration Write Target");
+    expect(selections[1]).toContain(":project:");
+    expect(selections[1]).toContain("global,project");
+    await expect(readFile(projectConfigPath, "utf-8")).resolves.toContain('model = "project/new"');
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'model = "global/old"',
+    );
+    expect(firstContentText(result)).toContain("Project Tool Configuration");
+    expect(result.details).toMatchObject({ modelWrite: { target: "project" } });
+  });
+
+  it("keeps project-local available but defaults the Configuration Write Target to global when project config does not own the effective model", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-global-target-"));
+    const workspacePath = join(root, "home", ".pi", "lambda-rlm");
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(workspacePath, { recursive: true });
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(join(workspacePath, "config.toml"), '[leaf]\nmodel = "global/old"\n', "utf-8");
+    await writeFile(projectConfigPath, "[run]\nmax_model_calls = 99\n", "utf-8");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        promptText: () => "global/new",
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return selections.length === 1 ? "select_formal_leaf_model" : "global";
+        },
+      },
+    });
+
+    expect(selections[1]).toContain(":global:");
+    expect(selections[1]).toContain("global,project");
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'model = "global/new"',
+    );
+    await expect(readFile(projectConfigPath, "utf-8")).resolves.toContain("max_model_calls = 99");
+    await expect(readFile(projectConfigPath, "utf-8")).resolves.not.toContain("global/new");
+    expect(result.details).toMatchObject({ modelWrite: { target: "global" } });
+  });
+
+  it("blocks interactive Formal Leaf model edits when the initial doctor report has invalid config", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-invalid-config-flow-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const invalidConfig = `[leaf]\nmodel = `;
+    await writeFile(join(workspacePath, "config.toml"), invalidConfig, "utf-8");
+    const prompts: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "local/qwen";
+        },
+        select: () => "select_formal_leaf_model",
+      },
+    });
+
+    const text = firstContentText(result);
+    expect(text).toContain("Formal Leaf Model Selection was not started");
+    expect(text).toContain("initial diagnostics reported invalid Lambda-RLM configuration");
+    expect(prompts).toStrictEqual([]);
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toBe(
+      invalidConfig,
+    );
+    expect(result.details).toMatchObject({
+      blockedAction: {
+        id: "select_formal_leaf_model",
+        reason: "initial_config_error",
+      },
+    });
+    expect(result.details).not.toHaveProperty("modelWrite");
+    expect(result.details).not.toHaveProperty("rerun");
+  });
+
+  it("offers invalid-config repair choices and preserves config when the interactive user cancels", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-invalid-cancel-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const invalidConfig = `[leaf]\nmodel = `;
+    await writeFile(join(workspacePath, "config.toml"), invalidConfig, "utf-8");
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return "cancel_invalid_config_repair";
+        },
+      },
+    });
+
+    expect(selections[0]).toContain("repair choices for invalid config");
+    expect(selections[0]).toContain("cancel_invalid_config_repair");
+    expect(selections[0]).toContain("rewrite_invalid_config_normalized");
+    expect(firstContentText(result)).toContain("Invalid config repair was cancelled");
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toBe(
+      invalidConfig,
+    );
+    expect(result.details).toMatchObject({
+      invalidConfigRepair: { action: "cancel_invalid_config_repair", rewritten: false },
+    });
+  });
+
+  it("performs confirmed normalized rewrite of invalid config with a backup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-invalid-rewrite-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const configPath = join(workspacePath, "config.toml");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const invalidConfig = `[leaf]\nmodel = `;
+    await writeFile(configPath, invalidConfig, "utf-8");
+    const prompts: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "REWRITE";
+        },
+        select: () => "rewrite_invalid_config_normalized",
+      },
+    });
+
+    expect(prompts[0]).toContain("Type REWRITE");
+    expect(prompts[0]).toContain("code=invalid_toml");
+    expect(prompts[0]).toContain("field=line 2");
+    expect(prompts[0]).toContain(`path=${configPath}`);
+    const details = result.details as { invalidConfigRepair?: { backupPath?: string } };
+    const backupPath = details.invalidConfigRepair?.backupPath;
+    expect(backupPath).toContain("config.toml.invalid.");
+    if (!backupPath) {
+      throw new Error("expected invalid config repair backup path");
+    }
+    await expect(readFile(backupPath, "utf-8")).resolves.toBe(invalidConfig);
+    await expect(readFile(configPath, "utf-8")).resolves.toContain(
+      '# model = "<provider>/<model-id>"',
+    );
+    expect(firstContentText(result)).toContain("confirmed normalized rewrite");
+  });
+
+  it("rewrites the exact invalid project config without changing a valid global config", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-project-invalid-rewrite-"));
+    const workspacePath = join(root, "home", ".pi", "lambda-rlm");
+    const globalConfigPath = join(workspacePath, "config.toml");
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const globalConfig = '[leaf]\nmodel = "global/valid"\n';
+    const invalidProjectConfig = `[leaf]\nmodel = `;
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(globalConfigPath, globalConfig, "utf-8");
+    await writeFile(projectConfigPath, invalidProjectConfig, "utf-8");
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        promptText: () => "REWRITE",
+        select: () => "rewrite_invalid_config_normalized",
+      },
+    });
+
+    await expect(readFile(globalConfigPath, "utf-8")).resolves.toBe(globalConfig);
+    await expect(readFile(projectConfigPath, "utf-8")).resolves.toContain(
+      '# model = "<provider>/<model-id>"',
+    );
+    const details = result.details as {
+      invalidConfigRepair?: { backupPath?: string; configPath?: string };
+    };
+    expect(details.invalidConfigRepair?.configPath).toBe(projectConfigPath);
+    if (!details.invalidConfigRepair?.backupPath) {
+      throw new Error("expected invalid project config backup path");
+    }
+    await expect(readFile(details.invalidConfigRepair.backupPath, "utf-8")).resolves.toBe(
+      invalidProjectConfig,
+    );
+  });
+
+  it("shows invalid config details before rewrite confirmation and before any file write", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-invalid-call-order-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const configPath = join(workspacePath, "config.toml");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const invalidConfig = `[leaf]\nmodel = `;
+    await writeFile(configPath, invalidConfig, "utf-8");
+    const events: string[] = [];
+
+    await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        promptText: async (prompt) => {
+          events.push(`confirm:${prompt}`);
+          await expect(readFile(configPath, "utf-8")).resolves.toBe(invalidConfig);
+          return "REWRITE";
+        },
+        select: (prompt) => {
+          events.push(`select:${prompt}`);
+          expect(prompt).toContain("code=invalid_toml");
+          expect(prompt).toContain("field=line 2");
+          expect(prompt).toContain("source=global");
+          expect(prompt).toContain(`path=${configPath}`);
+          return "rewrite_invalid_config_normalized";
+        },
+      },
+    });
+
+    expect(events[0]).toMatch(/^select:/);
+    expect(events[1]).toMatch(/^confirm:/);
+    expect(events[1]).toContain("code=invalid_toml");
+    expect(events[1]).toContain("field=line 2");
+    expect(events[1]).toContain("source=global");
+    expect(events[1]).toContain(`path=${configPath}`);
+    await expect(readFile(configPath, "utf-8")).resolves.toContain(
+      '# model = "<provider>/<model-id>"',
+    );
+  });
+
+  it("blocks the explicit real Formal Leaf smoke test when the initial doctor report has invalid config", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-invalid-smoke-flow-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const invalidConfig = `[leaf]\nmodel = `;
+    await writeFile(join(workspacePath, "config.toml"), invalidConfig, "utf-8");
+    const prompts: string[] = [];
+    const childPiCalls: ProcessInvocation[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: (invocation) => {
+        if (invocation.command === "pi" && !invocation.args.includes("--version")) {
+          childPiCalls.push(invocation);
+        }
+        return okDoctorRunner(invocation);
+      },
+      ui: {
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "RUN";
+        },
+        select: () => "run_real_formal_leaf_smoke_test",
+      },
+    });
+
+    const text = firstContentText(result);
+    expect(text).toContain("real Formal Leaf smoke test was not started");
+    expect(text).toContain("initial diagnostics reported invalid Lambda-RLM configuration");
+    expect(prompts).toStrictEqual([]);
+    expect(childPiCalls).toStrictEqual([]);
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toBe(
+      invalidConfig,
+    );
+    expect(result.details).toMatchObject({
+      blockedAction: {
+        id: "run_real_formal_leaf_smoke_test",
+        reason: "initial_config_error",
+      },
+    });
+    expect(result.details).not.toHaveProperty("realFormalLeafSmokeTest");
+    expect(result.details).not.toHaveProperty("modelWrite");
+    expect(result.details).not.toHaveProperty("rerun");
+  });
+
+  it("cancels the explicit real Formal Leaf smoke test after the cost/rate-limit warning without calling child Pi", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-smoke-cancel-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    await mkdir(workspacePath, { recursive: true });
+    await writeFile(
+      join(workspacePath, "config.toml"),
+      '[leaf]\nmodel = "provider/smoke"\nthinking = "low"\n',
+      "utf-8",
+    );
+    const prompts: string[] = [];
+    const childPiCalls: ProcessInvocation[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: (invocation) => {
+        if (invocation.command === "pi" && !invocation.args.includes("--version")) {
+          childPiCalls.push(invocation);
+        }
+        return okDoctorRunner(invocation);
+      },
+      ui: {
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "no";
+        },
+        select: () => "run_real_formal_leaf_smoke_test",
+      },
+    });
+
+    expect(prompts[0]).toContain("real Formal Leaf smoke test");
+    expect(prompts[0]).toContain("may spend model credits or rate limits");
+    expect(childPiCalls).toStrictEqual([]);
+    expect(firstContentText(result)).toContain("real Formal Leaf smoke test was cancelled");
+    expect(result.details).toMatchObject({
+      realFormalLeafSmokeTest: { ok: false, status: "cancelled" },
+    });
+  });
+
+  it("runs the explicit real Formal Leaf smoke test with the configured model and current Formal Leaf constraints", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-smoke-success-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    await mkdir(workspacePath, { recursive: true });
+    await writeFile(
+      join(workspacePath, "config.toml"),
+      '[leaf]\nmodel = "provider/smoke"\nthinking = "minimal"\npi_executable = "pi-smoke"\n',
+      "utf-8",
+    );
+    const childPiCalls: ProcessInvocation[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: async (invocation) => {
+        if (invocation.command === "python3" || invocation.args.includes("--version")) {
+          return okDoctorRunner(invocation);
+        }
+        childPiCalls.push(invocation);
+        const promptFile = invocation.args.at(-1);
+        const prompt = promptFile?.startsWith("@")
+          ? await readFile(promptFile.slice(1), "utf-8")
+          : "";
+        expect(prompt).toContain("real Formal Leaf smoke test");
+        return { exitCode: 0, stderr: "", stdout: "SMOKE_OK\n" };
+      },
+      ui: {
+        promptText: () => "RUN",
+        select: () => "run_real_formal_leaf_smoke_test",
+      },
+    });
+
+    expect(childPiCalls).toHaveLength(1);
+    const [childPiCall] = childPiCalls;
+    if (!childPiCall) {
+      throw new Error("expected one child Pi smoke test invocation");
+    }
+    expect(childPiCall).toMatchObject({ command: "pi-smoke" });
+    expect(childPiCall.args).toStrictEqual(expect.arrayContaining(["--model", "provider/smoke"]));
+    expect(childPiCall.args).toStrictEqual(expect.arrayContaining(["--thinking", "minimal"]));
+    expect(childPiCall.args).toStrictEqual(
+      expect.arrayContaining([
+        "--tools",
+        "read,grep,find,ls",
+        "--no-extensions",
+        "--no-skills",
+        "--no-context-files",
+        "--no-prompt-templates",
+        "--no-session",
+      ]),
+    );
+    expect(firstContentText(result)).toContain("real Formal Leaf smoke test succeeded");
+    expect(firstContentText(result)).toMatch(
+      /normal Doctor Command readiness semantics are unchanged/i,
+    );
+    expect(result.details).toMatchObject({
+      ok: true,
+      realFormalLeafSmokeTest: { leafModel: "provider/smoke", ok: true, status: "succeeded" },
+    });
+  });
+
+  it("reports explicit real Formal Leaf smoke test failures without changing doctor readiness", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-smoke-failure-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    await mkdir(workspacePath, { recursive: true });
+    await writeFile(
+      join(workspacePath, "config.toml"),
+      '[leaf]\nmodel = "provider/smoke"\n',
+      "utf-8",
+    );
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: (invocation) => {
+        if (invocation.command === "python3" || invocation.args.includes("--version")) {
+          return okDoctorRunner(invocation);
+        }
+        return { exitCode: 42, stderr: "provider denied", stdout: "" };
+      },
+      ui: {
+        promptText: () => "RUN",
+        select: () => "run_real_formal_leaf_smoke_test",
+      },
+    });
+
+    expect(firstContentText(result)).toContain("real Formal Leaf smoke test failed");
+    expect(firstContentText(result)).toMatch(
+      /normal Doctor Command readiness semantics are unchanged/i,
+    );
+    expect(result.details).toMatchObject({
+      ok: true,
+      realFormalLeafSmokeTest: {
+        ok: false,
+        status: "failed",
+        error: expect.objectContaining({ code: "child_exit_nonzero" }),
+      },
+    });
   });
 
   it("loads the Pi extension entrypoint and registers the lambda_rlm tool", () => {

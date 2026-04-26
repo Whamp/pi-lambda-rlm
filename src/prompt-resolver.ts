@@ -64,7 +64,7 @@ export function promptKeys() {
 }
 
 export function defaultBuiltInPromptDir() {
-  return fileURLToPath(new URL("../.pi/extensions/lambda-rlm/prompts", import.meta.url));
+  return fileURLToPath(new URL("../extensions/lambda-rlm/prompts", import.meta.url));
 }
 
 function sha256Hex(text: string) {

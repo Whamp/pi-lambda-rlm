@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { BridgeProtocolError, BridgeRunFailedError, runSyntheticBridge } from "./bridge-runner.js";
 import type { ModelCallRunner } from "./bridge-runner.js";
 import { resolveLambdaRlmConfig } from "./config-resolver.js";
-import type { LeafConfig, RunConfig } from "./config-resolver.js";
+import type { ConfigValidationError, LeafConfig, RunConfig } from "./config-resolver.js";
 import { runFormalPiLeafModelCall } from "./leaf-runner.js";
 import type { LeafThinking, ProcessRunner } from "./leaf-runner.js";
 import { ModelCallConcurrencyQueue } from "./model-call-queue.js";
@@ -48,6 +48,10 @@ export interface LambdaRlmParams {
 export interface LambdaRlmToolResult {
   content: TextContent[];
   details: Record<string, unknown>;
+}
+
+export function defaultLambdaRlmBridgePath() {
+  return fileURLToPath(new URL("../extensions/lambda-rlm/bridge.py", import.meta.url));
 }
 
 export interface ExecuteLambdaRlmToolOptions {
@@ -634,6 +638,14 @@ function perRunConfigOptions(validated: LambdaRlmParams) {
   return perRun;
 }
 
+function configValidationFailure(error: ConfigValidationError) {
+  const doctorCodes = new Set(["invalid_toml", "unknown_config_key", "invalid_config_value"]);
+  const message = doctorCodes.has(error.code)
+    ? `${error.message} Run /lambda-rlm-doctor for setup diagnostics and remediation guidance.`
+    : error.message;
+  return formatValidationFailure({ ...error, message });
+}
+
 async function resolveToolConfig(
   validated: LambdaRlmParams,
   options: ExecuteLambdaRlmToolOptions,
@@ -647,7 +659,7 @@ async function resolveToolConfig(
     perRun: perRunConfigOptions(validated),
   });
   if (!configResult.ok) {
-    return { ok: false as const, result: formatValidationFailure(configResult.error) };
+    return { ok: false as const, result: configValidationFailure(configResult.error) };
   }
   const runConfig =
     options.outputMaxVisibleChars === undefined
@@ -852,9 +864,7 @@ export async function executeLambdaRlmTool(
   const { loadedSources } = sources;
   const sourceMetadata = loadedSources.map(toSourceMetadata);
   const assembledContext = assembleSourceContext(loadedSources);
-  const bridgePath =
-    options.bridgePath ??
-    fileURLToPath(new URL("../.pi/extensions/lambda-rlm/bridge.py", import.meta.url));
+  const bridgePath = options.bridgePath ?? defaultLambdaRlmBridgePath();
   const runId = `lambda-rlm-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const leafModel = resolvedLeafModel(options, leafConfig);
   if (!leafModel) {
@@ -862,7 +872,7 @@ export async function executeLambdaRlmTool(
       code: "missing_leaf_model",
       field: "leaf.model",
       message:
-        'No Formal Leaf model is configured. Add [leaf].model (model = "<provider>/<model-id>") to ~/.pi/lambda-rlm/config.toml or the project .pi/lambda-rlm/config.toml.',
+        'No Formal Leaf model is configured. Run /lambda-rlm-doctor for diagnostics and Formal Leaf Model Selection, or add [leaf].model (model = "<provider>/<model-id>") to ~/.pi/lambda-rlm/config.toml or the project .pi/lambda-rlm/config.toml.',
     });
   }
   const leafPiExecutable = options.piExecutable ?? leafConfig.piExecutable;

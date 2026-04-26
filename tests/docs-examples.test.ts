@@ -15,14 +15,32 @@ describe("operator docs and examples", () => {
     expect(readme).toContain("agent-invoked Pi tool");
     expect(readme).toContain("not a provider or benchmark harness");
     expect(readme).toContain("pi install");
+    expect(readme).toContain("start a new Pi session");
     expect(readme).toContain("/reload");
+    expect(readme).toContain("Lambda-RLM User Workspace");
+    expect(readme).toContain("Copied Example Fixtures");
+    expect(readme).toContain("safe to edit");
     expect(readme).toContain("~/.pi/lambda-rlm/config.toml");
     expect(readme).toContain("[leaf]");
     expect(readme).toContain('model = "');
+    expect(readme).toContain("Configuration Write Target");
+    expect(readme).toContain("Project Tool Configuration");
+    expect(readme).toContain(
+      "Formal Leaf Thinking Selection uses the same Configuration Write Target prompt",
+    );
+    expect(readme).toContain(
+      "highlighted default matches the effective owner of `[leaf].thinking`",
+    );
     expect(readme).toContain("~/.pi/agent/models.json");
     expect(readme).toContain("~/.pi/agent/auth.json");
     expect(readme).toContain("/login");
     expect(readme).toContain("/lambda-rlm-doctor");
+    expect(readme).toContain("Formal Leaf Model Selection");
+    expect(readme).toContain("default doctor diagnostics do not spend real model credits");
+    expect(readme).toContain("real Formal Leaf smoke test");
+    expect(readme).toContain("No credential-ready models");
+    expect(readme).toContain("non-interactive");
+    expect(readme).toContain("Manual editing remains the fallback");
     expect(readme).toContain("contextPath");
     expect(readme).toContain("contextPaths");
     expect(readme).toContain("question");
@@ -30,6 +48,10 @@ describe("operator docs and examples", () => {
     expect(readme).toContain("[run]");
     expect(readme).toContain("Prompt overlays");
     expect(readme).toContain("manual copy only");
+    expect(readme).toContain(
+      "Model/config setup validation failures point to `/lambda-rlm-doctor`",
+    );
+    expect(readme).not.toContain("Tool validation failures also point there");
     expect(readme).toContain("Development notes");
     expect(readme).toContain("npm test");
     expect(readme).not.toContain(".env.example");
@@ -49,16 +71,9 @@ describe("operator docs and examples", () => {
 
     expect(pkg.private).not.toBeTruthy();
     expect(pkg.keywords).toContain("pi-package");
-    expect(pkg.pi?.extensions).toContain(".pi/extensions/lambda-rlm/index.ts");
+    expect(pkg.pi?.extensions).toContain("extensions/lambda-rlm/index.ts");
     expect(pkg.files).toStrictEqual(
-      expect.arrayContaining([
-        "src/",
-        "README.md",
-        ".pi/extensions/lambda-rlm/index.ts",
-        ".pi/extensions/lambda-rlm/bridge.py",
-        ".pi/extensions/lambda-rlm/prompts/",
-        ".pi/extensions/lambda-rlm/rlm/**/*.py",
-      ]),
+      expect.arrayContaining(["src/", "README.md", "examples/", "extensions/lambda-rlm/"]),
     );
   });
 

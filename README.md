@@ -2,7 +2,7 @@
 
 `lambda_rlm` is an **agent-invoked Pi tool** for asking questions over files that are too large, too numerous, or too awkward to paste into the parent agent conversation.
 
-Beginner version: install the Pi package, choose a child Pi model in `~/.pi/lambda-rlm/config.toml`, run `/lambda-rlm-doctor`, then ask Pi a question that references one or more file paths. The agent decides when calling `lambda_rlm` is better than reading those files directly.
+Beginner version: install the Pi package, restart or `/reload` Pi so extension load creates the **Lambda-RLM User Workspace** at `~/.pi/lambda-rlm/`, run interactive `/lambda-rlm-doctor` to validate setup and optionally enter a Formal Leaf model after diagnostics, then ask Pi a question that references one or more file paths. Manual `[leaf].model` TOML editing remains the fallback for non-interactive or diagnostic-only contexts. The agent decides when calling `lambda_rlm` is better than reading those files directly.
 
 It is **not a provider or benchmark harness**. It is also not something most users call by hand. It is a Pi extension tool that protects the parent agent context budget by doing long-context file work behind a tool boundary.
 
@@ -32,36 +32,46 @@ After installing, start a new Pi session or run:
 /reload
 ```
 
-### 2. Choose the Formal Leaf model
+### 2. Inspect the Lambda-RLM User Workspace
 
-`lambda_rlm` services Lambda-RLM model callbacks by spawning constrained child Pi processes. Those child calls need an explicit Pi model.
+When the extension loads after install, Workspace Scaffolding creates `~/.pi/lambda-rlm/` if it is missing and shows a one-time Scaffold Notification. The scaffold is non-destructive: existing `config.toml`, `README.md`, Copied Example Fixtures, and prompt overlays are never overwritten. Copied Example Fixtures in `~/.pi/lambda-rlm/examples/` are user-owned onboarding files, not package-owned runtime defaults, so they are safe to edit, rename, or copy while you experiment.
 
-Create `~/.pi/lambda-rlm/config.toml`:
+The generated `config.toml` is a Transparent Sparse Config Scaffold. It is valid TOML before model setup, keeps the Formal Leaf model commented so no billable model is auto-selected, and documents Run Control Policy defaults as comments instead of active copied overrides:
 
-```bash
-mkdir -p ~/.pi/lambda-rlm
-cat > ~/.pi/lambda-rlm/config.toml <<'EOF'
+```toml
 [leaf]
-# Use an exact model accepted by `pi --model`, normally <provider>/<model-id>.
-model = "google/gemini-3-flash-preview"
-
-# Optional. Defaults shown.
+# Add a Formal Leaf model manually before real Lambda-RLM runs.
+# Use a model accepted by Pi, for example: model = "<provider>/<model-id>"
+# model = "<provider>/<model-id>"
 thinking = "off"
 pi_executable = "pi"
 
 [run]
-# Optional run controls. Defaults shown.
-max_input_bytes = 1200000
-output_max_bytes = 51200
-output_max_lines = 2000
-max_model_calls = 1000
-whole_run_timeout_ms = 300000
-model_call_timeout_ms = 60000
-model_process_concurrency = 2
-EOF
+# Built-in Run Control Policy defaults are documented here as comments.
+# Uncomment only values you intentionally want to override.
+# max_input_bytes = 1200000
+# output_max_bytes = 51200
+# output_max_lines = 2000
+# max_model_calls = 1000
+# whole_run_timeout_ms = 300000
+# model_call_timeout_ms = 60000
+# model_process_concurrency = 2
 ```
 
-Pick a model that already works in Pi. Useful ways to find one:
+### 3. Configure the Formal Leaf model
+
+`lambda_rlm` services Lambda-RLM model callbacks by spawning constrained child Pi processes. Those child calls need an explicit Pi model. In interactive Pi sessions, run `/lambda-rlm-doctor`: after diagnostics, its Doctor Repair Flow can offer Formal Leaf Model Selection and prompt for a manual `provider/model-id` value.
+
+Configuration Write Target behavior follows config precedence. If no distinct project `.pi/lambda-rlm/config.toml` exists, Formal Leaf Model Selection writes the global config at `~/.pi/lambda-rlm/config.toml` without asking for a target. If a project config exists, doctor prompts for Global Tool Configuration versus Project Tool Configuration. The highlighted default matches the effective owner of `[leaf].model`: project-local is highlighted when project config owns the effective model, otherwise global is highlighted while project-local remains available. Formal Leaf Thinking Selection uses the same Configuration Write Target prompt, and its highlighted default matches the effective owner of `[leaf].thinking`.
+
+Manual editing remains the fallback for non-interactive or diagnostic-only contexts. Add `[leaf].model` to the effective config file doctor reports, or to `~/.pi/lambda-rlm/config.toml` for global setup, using a model that already works in Pi:
+
+```toml
+[leaf]
+model = "<provider>/<model-id>"
+```
+
+Useful ways to find a working model:
 
 ```bash
 pi --list-models
@@ -69,7 +79,7 @@ pi --list-models
 
 or open `/model` inside Pi.
 
-### 3. Make sure Pi can authenticate that model
+### 4. Make sure Pi can authenticate that model
 
 For built-in cloud providers, use `/login` in Pi or set the provider API key. Pi stores credentials in `~/.pi/agent/auth.json`.
 
@@ -103,7 +113,7 @@ Then use:
 model = "local-vllm/qwen3-coder"
 ```
 
-### 4. Run the doctor
+### 5. Run the doctor
 
 Inside Pi:
 
@@ -111,7 +121,7 @@ Inside Pi:
 /lambda-rlm-doctor
 ```
 
-The doctor is non-mutating. It checks:
+The doctor defensively reruns Workspace Scaffolding to restore missing onboarding files without overwriting user-owned files, then checks:
 
 - Python availability;
 - vendored Lambda-RLM importability and local fork seams;
@@ -120,11 +130,13 @@ The doctor is non-mutating. It checks:
 - Pi executable availability;
 - Formal Leaf command shape;
 - prompt overlays;
-- a deterministic mock bridge run that does not spend model credits.
+- a deterministic mock bridge run that does not spend real model credits.
 
-If the doctor reports a `leaf_model` error, fix `[leaf].model`, Pi credentials, or `~/.pi/agent/models.json`, then rerun it.
+The default doctor diagnostics do not spend real model credits. Any real Formal Leaf smoke test is an explicit Doctor Command action that you choose, and it is not part of the default pass/fail readiness checks.
 
-### 5. Use it naturally
+In interactive sessions, the doctor shows a post-diagnostics action menu. Formal Leaf Model Selection can prompt for a manual model pattern and update the selected config after diagnostics. Formal Leaf Thinking Selection is also available as secondary tuning for `[leaf].thinking` with the supported values `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`; thinking-only Targeted Config Edits do not require an automatic full diagnostic rerun. With no project config, model and thinking selection default to the global config without asking. When project config exists, both actions ask for a write target and highlight project-local when that project config owns the effective `[leaf].model` or `[leaf].thinking` value for the selected action. If the doctor reports invalid TOML/configuration, it reports code/field/source/path details before offering repair choices. The safe default is cancel, which leaves the file unchanged. If you explicitly confirm, doctor can create a backup and replace the exact invalid config file with a normalized scaffold; non-interactive Diagnostic-Only Doctor Mode never rewrites config. The model and thinking actions remain blocked while config is invalid. If the doctor reports a `leaf_model` error, use the model action or manually fix `[leaf].model`, Pi credentials, or `~/.pi/agent/models.json`, then rerun it.
+
+### 6. Use it naturally
 
 Ask Pi questions like:
 
@@ -145,13 +157,13 @@ The agent should call `lambda_rlm` with paths and a question when it needs bound
 This package declares itself as a Pi package with this extension entrypoint:
 
 ```text
-.pi/extensions/lambda-rlm/index.ts
+extensions/lambda-rlm/index.ts
 ```
 
 Runtime assets are included under:
 
 ```text
-.pi/extensions/lambda-rlm/
+extensions/lambda-rlm/
   bridge.py
   prompts/
   prompt-templates/
@@ -218,7 +230,7 @@ Configuration resolves as sparse overlays in this order:
 3. project config at `<cwd>/.pi/lambda-rlm/config.toml`;
 4. per-run tightening from the tool call for supported `[run]` limits only.
 
-Project configuration is inside the project trust boundary, so it may override global defaults for that project.
+Project configuration is inside the project trust boundary, so it may override global defaults for that project. When `cwd` is the home directory and the global and project paths are the same `~/.pi/lambda-rlm/config.toml`, that file is treated as Global Tool Configuration only.
 
 ### `[leaf]` keys
 
@@ -251,7 +263,7 @@ Invalid TOML, unknown tables, unknown keys, duplicate keys, non-positive `[run]`
 Built-in prompt defaults live in:
 
 ```text
-.pi/extensions/lambda-rlm/prompts/
+extensions/lambda-rlm/prompts/
 ```
 
 Operators may override individual prompts by creating sparse Markdown overlays:
@@ -284,7 +296,7 @@ Prompt templates use strict placeholders such as `<<text>>`, `<<query>>`, `<<met
 Copyable prompt examples live in:
 
 ```text
-.pi/extensions/lambda-rlm/prompt-templates/
+extensions/lambda-rlm/prompt-templates/
 ```
 
 Those templates are **manual copy only**. Runtime loading never creates or mutates operator-owned prompt overlays.
@@ -337,9 +349,11 @@ A failed run marks the answer as non-authoritative. Validation failures happen b
 
 ## Troubleshooting
 
+Most setup failures should be diagnosed through `/lambda-rlm-doctor`. Model/config setup validation failures point to `/lambda-rlm-doctor` when the Lambda-RLM Tool cannot run because setup is incomplete.
+
 ### `/lambda-rlm-doctor` says `leaf_model` is missing
 
-Create or update `~/.pi/lambda-rlm/config.toml`:
+Run interactive `/lambda-rlm-doctor` and choose Formal Leaf Model Selection, or create/update `~/.pi/lambda-rlm/config.toml` manually:
 
 ```toml
 [leaf]
@@ -348,13 +362,25 @@ model = "<provider>/<model-id>"
 
 Use a model shown by `/model` or `pi --list-models`.
 
+### Invalid config or TOML
+
+If doctor reports invalid TOML, unknown keys, duplicate keys, or an invalid `[leaf]` value, fix the reported path/field and rerun `/lambda-rlm-doctor`. In interactive mode, doctor may offer an explicit backup-and-normalize repair for the invalid file. In non-interactive Diagnostic-Only Doctor Mode, it prints exact manual remediation and never mutates config.
+
 ### The model exists but doctor says credentials are missing
 
-Authenticate the provider with `/login`, an environment variable, or `~/.pi/agent/auth.json`.
+Authenticate the provider with `/login`, an environment variable, or `~/.pi/agent/auth.json`, then rerun `/lambda-rlm-doctor`.
 
-### A local model is not found
+### No credential-ready models
 
-Add it to `~/.pi/agent/models.json`, confirm `pi --model provider/model-id "hello"` works, then rerun `/lambda-rlm-doctor`.
+If doctor cannot find credential-ready Candidate Leaf Model Set entries, use `/login` for a cloud provider, add a local/custom provider to `~/.pi/agent/models.json`, or use manual Formal Leaf Model Selection with a model pattern you know Pi can run. Missing-auth models may be selectable only through an explicit expanded list and can still fail doctor until credentials are configured.
+
+### Local or custom models are not found
+
+Add the provider/model to `~/.pi/agent/models.json`, confirm `pi --model provider/model-id "hello"` works, then rerun `/lambda-rlm-doctor`.
+
+### Non-interactive remediation
+
+When Pi UI is unavailable, `/lambda-rlm-doctor` stays diagnostic-only: it reports readiness, config paths/source precedence, and manual snippets without prompts or writes. Apply the printed TOML or credential/model changes yourself, then rerun `/lambda-rlm-doctor`.
 
 ### Runs time out or spawn too many child processes
 
@@ -389,7 +415,7 @@ From a checkout:
 npm ci
 npm test
 npm run typecheck
-python3 -m py_compile .pi/extensions/lambda-rlm/bridge.py $(find .pi/extensions/lambda-rlm/rlm -name '*.py' -type f | sort)
+python3 -m py_compile extensions/lambda-rlm/bridge.py $(find extensions/lambda-rlm/rlm -name '*.py' -type f | sort)
 ```
 
 Real smoke tests require a working Pi model in `~/.pi/lambda-rlm/config.toml` or project `.pi/lambda-rlm/config.toml`:
@@ -405,9 +431,15 @@ Then run:
 npm run test:pi-leaf-smoke
 ```
 
-This repository also includes a project-local dogfooding entrypoint at `.pi/extensions/lambda-rlm/index.ts`. When Pi starts in this checkout, that entrypoint registers `lambda_rlm` even before a global install. After editing extension code, run `/reload` or restart Pi.
+For local development, install this checkout as a Pi package:
 
-Important gotcha: Pi sends registered tool schemas to the active model provider before the agent can answer a prompt. An invalid `lambda_rlm` schema can therefore break unrelated requests in this repository even if the agent never calls the tool. Keep public tool parameter schemas provider-compatible: top-level object schemas only, with conditional rules enforced in runtime validation.
+```bash
+pi install /absolute/path/to/pi-lambda-rlm
+```
+
+Local path installs are not copied, so edits in the checkout are picked up after `/reload` or a Pi restart. The repo intentionally does not ship a `.pi/extensions/` auto-discovery entrypoint; loading the extension should be explicit through `pi install`.
+
+Important gotcha: Pi sends registered tool schemas to the active model provider before the agent can answer a prompt. An invalid `lambda_rlm` schema can therefore break requests in any session where the package is installed, even if the agent never calls the tool. Keep public tool parameter schemas provider-compatible: top-level object schemas only, with conditional rules enforced in runtime validation.
 
 ## MVP non-goals
 
@@ -434,8 +466,8 @@ This project is an integration layer. It does not claim credit for the underlyin
 With thanks to:
 
 - **Original RLM repository:** [alexzhang13/rlm](https://github.com/alexzhang13/rlm), the Recursive Language Models implementation and research code by Alex L. Zhang and collaborators. The upstream repository is MIT licensed and is the source of the “normal RLM” components that Lambda-RLM builds on.
-- **Lambda-RLM repository:** [lambda-calculus-LLM/lambda-RLM](https://github.com/lambda-calculus-LLM/lambda-RLM), the λ-RLM implementation for typed recursive long-context reasoning. This repository vendors a local/forked copy from commit `3874d393483dc4299101918cf8e9af670194bd88` under `.pi/extensions/lambda-rlm/rlm/`.
+- **Lambda-RLM repository:** [lambda-calculus-LLM/lambda-RLM](https://github.com/lambda-calculus-LLM/lambda-RLM), the λ-RLM implementation for typed recursive long-context reasoning. This repository vendors a local/forked copy from commit `3874d393483dc4299101918cf8e9af670194bd88` under `extensions/lambda-rlm/rlm/`.
 
-The vendored Lambda-RLM package is MIT licensed. Keep the upstream license notice at `.pi/extensions/lambda-rlm/rlm/LICENSE` and the local fork boundary notes at `.pi/extensions/lambda-rlm/rlm/LOCAL_FORK.md` when updating, pruning, or replacing the vendored code.
+The vendored Lambda-RLM package is MIT licensed. Keep the upstream license notice at `extensions/lambda-rlm/rlm/LICENSE` and the local fork boundary notes at `extensions/lambda-rlm/rlm/LOCAL_FORK.md` when updating, pruning, or replacing the vendored code.
 
 This repository adds the Pi-specific boundary: path-based tool validation, TOML run controls, prompt overlays, the Python NDJSON bridge, constrained Formal Leaf Pi callbacks, diagnostics, and bounded result formatting.
