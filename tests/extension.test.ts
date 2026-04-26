@@ -1063,6 +1063,51 @@ describe("lambda_rlm Pi extension registration", () => {
     );
   });
 
+  it("blocks the explicit real Formal Leaf smoke test when the initial doctor report has invalid config", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-invalid-smoke-flow-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const invalidConfig = `[leaf]\nmodel = `;
+    await writeFile(join(workspacePath, "config.toml"), invalidConfig, "utf-8");
+    const prompts: string[] = [];
+    const childPiCalls: ProcessInvocation[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: (invocation) => {
+        if (invocation.command === "pi" && !invocation.args.includes("--version")) {
+          childPiCalls.push(invocation);
+        }
+        return okDoctorRunner(invocation);
+      },
+      ui: {
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "RUN";
+        },
+        select: () => "run_real_formal_leaf_smoke_test",
+      },
+    });
+
+    const text = firstContentText(result);
+    expect(text).toContain("real Formal Leaf smoke test was not started");
+    expect(text).toContain("initial diagnostics reported invalid Lambda-RLM configuration");
+    expect(prompts).toStrictEqual([]);
+    expect(childPiCalls).toStrictEqual([]);
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toBe(
+      invalidConfig,
+    );
+    expect(result.details).toMatchObject({
+      blockedAction: {
+        id: "run_real_formal_leaf_smoke_test",
+        reason: "initial_config_error",
+      },
+    });
+    expect(result.details).not.toHaveProperty("realFormalLeafSmokeTest");
+    expect(result.details).not.toHaveProperty("modelWrite");
+    expect(result.details).not.toHaveProperty("rerun");
+  });
+
   it("cancels the explicit real Formal Leaf smoke test after the cost/rate-limit warning without calling child Pi", async () => {
     const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-smoke-cancel-"));
     const workspacePath = join(root, ".pi", "lambda-rlm");

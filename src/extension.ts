@@ -380,6 +380,22 @@ async function blockUnsafeModelSelection(args: InteractiveRepairArgs) {
   };
 }
 
+async function blockUnsafeRealFormalLeafSmokeTest(args: InteractiveRepairArgs) {
+  const combinedText = `${args.initialText}\n\nThe real Formal Leaf smoke test was not started because initial diagnostics reported invalid Lambda-RLM configuration. Fix the TOML/config error first, then rerun /lambda-rlm-doctor.`;
+  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  return {
+    content: [{ text: combinedText, type: "text" }],
+    details: {
+      ...args.report,
+      actions: args.menu,
+      blockedAction: {
+        id: "run_real_formal_leaf_smoke_test",
+        reason: "initial_config_error",
+      },
+    },
+  };
+}
+
 async function runInteractiveThinkingSelection(args: InteractiveRepairArgs) {
   const thinking = await chooseFormalLeafThinking(args.ctx);
   if (!thinking) {
@@ -603,7 +619,7 @@ async function maybeRunInteractiveModelSelection(args: {
   }
   if (selectedAction === "run_real_formal_leaf_smoke_test") {
     return initialConfigError
-      ? blockUnsafeModelSelection({ ...repairArgs, menu: args.menu })
+      ? blockUnsafeRealFormalLeafSmokeTest(repairArgs)
       : runInteractiveRealFormalLeafSmokeTest(repairArgs);
   }
   if (selectedAction !== "select_formal_leaf_model") {
