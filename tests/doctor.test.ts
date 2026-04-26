@@ -2,7 +2,11 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { runLambdaRlmDoctor } from "../src/doctor.js";
+import {
+  buildDoctorActionMenu,
+  renderDoctorCommandOutput,
+  runLambdaRlmDoctor,
+} from "../src/doctor.js";
 import type { ProcessRunner } from "../src/leaf-runner.js";
 
 function tempDir() {
@@ -351,5 +355,119 @@ describe("lambda_rlm doctor diagnostics", () => {
       }),
     );
     expect(JSON.stringify(report)).not.toMatch(/pip install|npm install|auto-seed|wrote prompt/i);
+  });
+
+  it("keeps the diagnostic core separately testable from post-diagnostics Doctor Repair Flow actions", async () => {
+    const root = await tempDir();
+
+    const report = await runLambdaRlmDoctor({
+      cwd: root,
+      env: {},
+      homeDir: join(root, "home"),
+      mockBridgeRunner: () => ({ ok: true, message: "mock bridge ok" }),
+      processRunner: okRunner,
+    });
+
+    expect(report.checks.map((entry) => entry.name)).toContain("leaf_model");
+    expect(report).not.toHaveProperty("actions");
+
+    const menu = buildDoctorActionMenu(report);
+    expect(menu.actions.map((action) => action.id)).toStrictEqual([
+      "select_formal_leaf_model",
+      "keep_current_configuration",
+      "change_formal_leaf_thinking",
+      "show_config_paths",
+    ]);
+    expect(menu.defaultActionId).toBe("select_formal_leaf_model");
+    expect(menu.actions[0]).toMatchObject({ recommended: true });
+  });
+
+  it("highlights keeping current configuration as the safe default action when diagnostics pass", async () => {
+    const root = await tempDir();
+    const projectConfigPath = await writeLeafConfig(root);
+
+    const report = await runLambdaRlmDoctor({
+      cwd: root,
+      mockBridgeRunner: () => ({ ok: true, message: "mock bridge ok" }),
+      processRunner: okRunner,
+      projectConfigPath,
+    });
+
+    const menu = buildDoctorActionMenu(report);
+
+    expect(report.ok).toBeTruthy();
+    expect(menu.defaultActionId).toBe("keep_current_configuration");
+    expect(menu.actions).toContainEqual(
+      expect.objectContaining({
+        id: "keep_current_configuration",
+        recommended: true,
+        safeDefault: true,
+      }),
+    );
+    expect(menu.actions).toContainEqual(
+      expect.objectContaining({ id: "select_formal_leaf_model" }),
+    );
+  });
+
+  it("renders Diagnostic-Only Doctor Mode with exact manual remediation snippets and no action menu", async () => {
+    const root = await tempDir();
+
+    const report = await runLambdaRlmDoctor({
+      cwd: root,
+      env: {},
+      homeDir: join(root, "home"),
+      mockBridgeRunner: () => ({ ok: true, message: "mock bridge ok" }),
+      processRunner: okRunner,
+    });
+
+    const output = renderDoctorCommandOutput(report, { interactive: false });
+
+    expect(output).toContain("Diagnostic-Only Doctor Mode");
+    expect(output).not.toContain("Post-diagnostics action menu");
+    expect(output).toContain("~/.pi/lambda-rlm/config.toml");
+    expect(output).toContain('[leaf]\nmodel = "<provider>/<model-id>"');
+    expect(output).toContain("pi --list-models");
+  });
+
+  it("renders invalid setup manual remediation in Diagnostic-Only Doctor Mode", async () => {
+    const root = await tempDir();
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(projectConfigPath, "[run]\nmax_model_calls = 0\n", "utf-8");
+
+    const report = await runLambdaRlmDoctor({
+      cwd: root,
+      mockBridgeRunner: () => ({ ok: true, message: "mock bridge ok" }),
+      processRunner: okRunner,
+      projectConfigPath,
+    });
+
+    const output = renderDoctorCommandOutput(report, { interactive: false });
+
+    expect(output).toContain("Invalid Lambda-RLM setup/configuration");
+    expect(output).toContain("Fix TOML syntax and supported keys");
+    expect(output).toContain('thinking = "off"');
+    expect(output).toContain('pi_executable = "pi"');
+    expect(output).toContain("Doctor will not normalize, rewrite, or mutate invalid configuration");
+  });
+
+  it("renders an interactive post-diagnostics action menu after diagnostics", async () => {
+    const root = await tempDir();
+    const projectConfigPath = await writeLeafConfig(root);
+
+    const report = await runLambdaRlmDoctor({
+      cwd: root,
+      mockBridgeRunner: () => ({ ok: true, message: "mock bridge ok" }),
+      processRunner: okRunner,
+      projectConfigPath,
+    });
+
+    const output = renderDoctorCommandOutput(report, { interactive: true });
+
+    expect(output.indexOf("Diagnostics:")).toBeLessThan(
+      output.indexOf("Post-diagnostics action menu"),
+    );
+    expect(output).toContain("keep_current_configuration (recommended, safe default)");
+    expect(output).toContain("select_formal_leaf_model");
   });
 });

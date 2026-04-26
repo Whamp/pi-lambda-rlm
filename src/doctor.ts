@@ -26,6 +26,25 @@ export interface DoctorReport {
   checks: DoctorCheck[];
 }
 
+export type DoctorActionId =
+  | "select_formal_leaf_model"
+  | "keep_current_configuration"
+  | "change_formal_leaf_thinking"
+  | "show_config_paths";
+
+export interface DoctorAction {
+  id: DoctorActionId;
+  label: string;
+  description: string;
+  recommended: boolean;
+  safeDefault: boolean;
+}
+
+export interface DoctorActionMenu {
+  actions: DoctorAction[];
+  defaultActionId: DoctorActionId;
+}
+
 type MockBridgeResult =
   | { ok: true; message: string; details?: Record<string, unknown> }
   | { ok: false; message: string; details?: Record<string, unknown> };
@@ -467,6 +486,144 @@ function doctorScaffoldWorkspacePath(options: DoctorOptions) {
   if (options.homeDir) {
     return join(options.homeDir, ".pi", "lambda-rlm");
   }
+}
+
+function hasLeafModelProblem(report: DoctorReport) {
+  return report.checks.some((entry) => entry.name === "leaf_model" && entry.status !== "ok");
+}
+
+export function buildDoctorActionMenu(report: DoctorReport): DoctorActionMenu {
+  const recommendModelSelection = hasLeafModelProblem(report);
+  const recommendKeepCurrent = report.ok && !recommendModelSelection;
+  const actions: DoctorAction[] = [
+    {
+      description:
+        "Start Formal Leaf Model Selection. This Doctor Repair Flow is available after every diagnostic run, including passing runs.",
+      id: "select_formal_leaf_model",
+      label: "Choose or change the Formal Leaf model",
+      recommended: recommendModelSelection,
+      safeDefault: false,
+    },
+    {
+      description: "Keep the current Lambda-RLM configuration without mutating files.",
+      id: "keep_current_configuration",
+      label: "Keep current configuration",
+      recommended: recommendKeepCurrent,
+      safeDefault: recommendKeepCurrent,
+    },
+    {
+      description:
+        "Open Formal Leaf Thinking Selection later; this is tuning and is not required for readiness.",
+      id: "change_formal_leaf_thinking",
+      label: "Change Formal Leaf thinking level",
+      recommended: false,
+      safeDefault: false,
+    },
+    {
+      description: "Show global/project configuration paths and source precedence.",
+      id: "show_config_paths",
+      label: "Show config paths and precedence",
+      recommended: false,
+      safeDefault: false,
+    },
+  ];
+  return {
+    actions,
+    defaultActionId: recommendModelSelection
+      ? "select_formal_leaf_model"
+      : "keep_current_configuration",
+  };
+}
+
+function diagnosticLine(checkEntry: DoctorCheck) {
+  return `- [${checkEntry.status}] ${checkEntry.name}: ${checkEntry.message}`;
+}
+
+function manualRemediationSnippets(report: DoctorReport) {
+  const snippets: string[] = [];
+  const leafModel = report.checks.find((entry) => entry.name === "leaf_model");
+  if (leafModel?.status !== "ok") {
+    snippets.push(`Missing or invalid Formal Leaf model:
+
+Edit ~/.pi/lambda-rlm/config.toml:
+
+\`\`\`toml
+[leaf]
+model = "<provider>/<model-id>"
+\`\`\`
+
+Choose a model that Pi already accepts, for example one shown by:
+
+\`\`\`bash
+pi --list-models
+\`\`\`
+
+Then rerun /lambda-rlm-doctor.`);
+  }
+  const invalidConfig = report.checks.find(
+    (entry) => entry.name === "config" && entry.status === "error",
+  );
+  if (invalidConfig) {
+    snippets.push(`Invalid Lambda-RLM setup/configuration:
+
+Fix TOML syntax and supported keys in ~/.pi/lambda-rlm/config.toml or <project>/.pi/lambda-rlm/config.toml. Minimal valid setup:
+
+\`\`\`toml
+[leaf]
+model = "<provider>/<model-id>"
+thinking = "off"
+pi_executable = "pi"
+\`\`\`
+
+Doctor will not normalize, rewrite, or mutate invalid configuration in Diagnostic-Only Doctor Mode.`);
+  }
+  for (const entry of report.checks) {
+    if (
+      entry.status !== "ok" &&
+      entry.remediation &&
+      entry.name !== "leaf_model" &&
+      entry.name !== "config"
+    ) {
+      snippets.push(`${entry.name}: ${entry.remediation}`);
+    }
+  }
+  return snippets;
+}
+
+export function renderDoctorCommandOutput(
+  report: DoctorReport,
+  options: { interactive: boolean },
+): string {
+  const lines = [
+    `lambda_rlm doctor ${report.ok ? "passed" : "found errors"}: ${report.checks.filter((entry) => entry.status === "error").length} error(s), ${report.checks.filter((entry) => entry.status === "warn").length} warning(s).`,
+    "",
+    "Diagnostics:",
+    ...report.checks.map(diagnosticLine),
+  ];
+  if (options.interactive) {
+    const menu = buildDoctorActionMenu(report);
+    lines.push("", "Post-diagnostics action menu (Doctor Repair Flow):");
+    for (const action of menu.actions) {
+      const badges = [
+        action.recommended ? "recommended" : undefined,
+        action.safeDefault ? "safe default" : undefined,
+      ].filter(Boolean);
+      lines.push(
+        `- ${action.id}${badges.length > 0 ? ` (${badges.join(", ")})` : ""}: ${action.label}`,
+      );
+    }
+    lines.push(`Default action: ${menu.defaultActionId}`);
+  } else {
+    const snippets = manualRemediationSnippets(report);
+    lines.push(
+      "",
+      "Diagnostic-Only Doctor Mode: no UI prompts were shown and no Doctor Repair Flow mutations were performed.",
+    );
+    if (snippets.length > 0) {
+      lines.push("", "Manual remediation snippets:", snippets.join("\n\n---\n\n"));
+    }
+  }
+  return lines.join("\n");
 }
 
 export async function runLambdaRlmDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
