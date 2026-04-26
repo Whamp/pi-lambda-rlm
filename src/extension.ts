@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { executeLambdaRlmTool, LambdaRlmValidationError } from "./lambda-rlm-tool.js";
 import { runLambdaRlmDoctor } from "./doctor.js";
+import { ensureLambdaRlmUserWorkspace } from "./workspace-scaffolding.js";
 import type { ProcessRunner } from "./leaf-runner.js";
 import type { ModelCallConcurrencyQueue } from "./model-call-queue.js";
 
@@ -86,11 +87,13 @@ interface MinimalCommandContext {
   ui?: { notify?: (message: string) => void | Promise<void> };
 }
 interface MinimalPiApi {
+  lambdaRlmWorkspacePath?: string;
   registerTool(tool: Record<string, unknown>): void;
   registerCommand?: (
     name: string,
     options: { description: string; handler: (...args: unknown[]) => Promise<unknown> },
   ) => void;
+  ui?: { notify?: (message: string) => void | Promise<void> };
 }
 interface MinimalExtensionContext {
   cwd: string;
@@ -113,6 +116,16 @@ function commandContextFromArgs(args: unknown[]): MinimalCommandContext {
 
 export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
   const modelCallQueueState: { current?: ModelCallConcurrencyQueue } = {};
+  if (process.env.NODE_ENV !== "test" || pi.lambdaRlmWorkspacePath) {
+    const scaffold = ensureLambdaRlmUserWorkspace(
+      pi.lambdaRlmWorkspacePath ? { workspacePath: pi.lambdaRlmWorkspacePath } : {},
+    );
+    if (scaffold.createdWorkspace) {
+      void pi.ui?.notify?.(
+        "Lambda-RLM User Workspace created. Run /lambda-rlm-doctor to choose a Formal Leaf model.",
+      );
+    }
+  }
 
   pi.registerCommand?.("lambda-rlm-doctor", {
     description:
@@ -123,6 +136,7 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
         cwd: ctx.cwd ?? process.cwd(),
         ...(ctx.leafProcessRunner ? { processRunner: ctx.leafProcessRunner } : {}),
         ...(ctx.modelRegistry ? { modelRegistry: ctx.modelRegistry } : {}),
+        ...(pi.lambdaRlmWorkspacePath ? { workspacePath: pi.lambdaRlmWorkspacePath } : {}),
       });
       const summary = `lambda_rlm doctor ${report.ok ? "passed" : "found errors"}: ${report.checks.filter((entry) => entry.status === "error").length} error(s), ${report.checks.filter((entry) => entry.status === "warn").length} warning(s).`;
       await ctx.ui?.notify?.(summary);

@@ -52,6 +52,11 @@ interface RegisteredCommand {
   };
 }
 
+interface RegistrationOptions {
+  notify?: (message: string) => void | Promise<void>;
+  workspacePath?: string;
+}
+
 const FORBIDDEN_TOP_LEVEL_SCHEMA_KEYS = ["oneOf", "anyOf", "allOf", "enum", "not"] as const;
 const FORBIDDEN_SCHEMA_COMBINATORS = ["oneOf", "anyOf", "allOf", "not"] as const;
 
@@ -82,9 +87,14 @@ function firstContentText(result: ToolResult) {
   return content.text;
 }
 
-function registeredTools(register: typeof registerLambdaRlmExtension = registerLambdaRlmExtension) {
+function registeredTools(
+  register: typeof registerLambdaRlmExtension = registerLambdaRlmExtension,
+  options: RegistrationOptions = {},
+) {
   const tools: RegisteredTool[] = [];
   register({
+    ...(options.notify ? { ui: { notify: options.notify } } : {}),
+    ...(options.workspacePath ? { lambdaRlmWorkspacePath: options.workspacePath } : {}),
     registerTool: (tool: Record<string, unknown>) => tools.push(tool as unknown as RegisteredTool),
   });
   return tools;
@@ -152,11 +162,14 @@ function schemaCompatibilityProblems(tool: RegisteredTool): string[] {
 
 function registeredLambdaRlmCommand(
   register: typeof registerLambdaRlmExtension = registerLambdaRlmExtension,
+  options: RegistrationOptions = {},
 ) {
   const commands: RegisteredCommand[] = [];
   register({
-    registerCommand: (name, options) =>
-      commands.push({ name, options: options as unknown as RegisteredCommand["options"] }),
+    ...(options.notify ? { ui: { notify: options.notify } } : {}),
+    ...(options.workspacePath ? { lambdaRlmWorkspacePath: options.workspacePath } : {}),
+    registerCommand: (name, commandOptions) =>
+      commands.push({ name, options: commandOptions as unknown as RegisteredCommand["options"] }),
     registerTool: () => {
       // Command-only registration test.
     },
@@ -168,6 +181,41 @@ function registeredLambdaRlmCommand(
   return command;
 }
 describe("lambda_rlm Pi extension registration", () => {
+  it("scaffolds the Lambda-RLM User Workspace on extension load and emits Scaffold Notification only on first creation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-workspace-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const notifications: string[] = [];
+
+    registeredTools(registerLambdaRlmExtension, {
+      workspacePath,
+      notify: (message) => {
+        notifications.push(message);
+      },
+    });
+    await Promise.resolve();
+
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      "# model =",
+    );
+    await expect(readFile(join(workspacePath, "README.md"), "utf-8")).resolves.toContain(
+      "Lambda-RLM User Workspace",
+    );
+    await expect(
+      readFile(join(workspacePath, "examples", "single-file-qa", "context.md"), "utf-8"),
+    ).resolves.toContain("context budget");
+    expect(notifications).toStrictEqual([expect.stringContaining("Lambda-RLM User Workspace")]);
+
+    registeredTools(registerLambdaRlmExtension, {
+      workspacePath,
+      notify: (message) => {
+        notifications.push(message);
+      },
+    });
+    await Promise.resolve();
+
+    expect(notifications).toHaveLength(1);
+  });
+
   it("registers a lambda_rlm tool with a strict path-based schema and optional per-run tightening", () => {
     const tool = registeredLambdaRlmTool();
 

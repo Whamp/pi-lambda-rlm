@@ -8,6 +8,7 @@ import type { Awaitable, ProcessRunner } from "./leaf-runner.js";
 import { resolvePromptBundle } from "./prompt-resolver.js";
 import { resolveLambdaRlmConfig } from "./config-resolver.js";
 import { runSyntheticBridge } from "./bridge-runner.js";
+import { ensureLambdaRlmUserWorkspace } from "./workspace-scaffolding.js";
 
 export type DoctorStatus = "ok" | "warn" | "error";
 
@@ -48,6 +49,7 @@ export interface DoctorOptions {
   projectPromptDir?: string;
   bridgePath?: string;
   mockBridgeRunner?: () => Awaitable<MockBridgeResult>;
+  workspacePath?: string;
 }
 
 function check(
@@ -455,6 +457,11 @@ async function mockBridgeCheck(
 }
 
 export async function runLambdaRlmDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
+  if (process.env.NODE_ENV !== "test" || options.workspacePath) {
+    await ensureLambdaRlmUserWorkspace(
+      options.workspacePath ? { workspacePath: options.workspacePath } : {},
+    );
+  }
   const cwd = options.cwd ?? process.cwd();
   const pythonPath = options.pythonPath ?? "python3";
   const piExecutable = await piExecutableForDoctor(options, cwd);
