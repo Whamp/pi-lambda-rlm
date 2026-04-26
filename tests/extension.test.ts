@@ -648,6 +648,124 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(result.details).toMatchObject({ modelWrite: { model: "manual/provider" } });
   });
 
+  it("supports Formal Leaf Thinking Selection with supported values and no required diagnostics rerun", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-thinking-flow-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return selections.length === 1 ? "change_formal_leaf_thinking" : "high";
+        },
+      },
+    });
+
+    expect(selections[0]).toContain("change_formal_leaf_thinking");
+    expect(selections[1]).toContain("Formal Leaf Thinking Selection");
+    expect(selections[1]).toContain(":off:");
+    expect(selections[1]).toContain("off,minimal,low,medium,high,xhigh");
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'thinking = "high"',
+    );
+    const text = firstContentText(result);
+    expect(text).toContain("Formal Leaf Thinking Selection wrote high");
+    expect(text).toContain("no automatic full diagnostic rerun was required");
+    expect(text.match(/Diagnostics:/g)).toHaveLength(1);
+    expect(result.details).toMatchObject({ thinkingWrite: { thinking: "high", target: "global" } });
+    expect(result.details).not.toHaveProperty("rerun");
+  });
+
+  it("prompts for a Configuration Write Target when project config owns effective thinking and avoids rerun", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-thinking-target-"));
+    const workspacePath = join(root, "home", ".pi", "lambda-rlm");
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(workspacePath, { recursive: true });
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(join(workspacePath, "config.toml"), '[leaf]\nthinking = "low"\n', "utf-8");
+    await writeFile(projectConfigPath, '[leaf]\nthinking = "off"\n', "utf-8");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          if (selections.length === 1) {
+            return "change_formal_leaf_thinking";
+          }
+          if (selections.length === 2) {
+            return "high";
+          }
+          return "project";
+        },
+      },
+    });
+
+    expect(selections[2]).toContain("Configuration Write Target");
+    expect(selections[2]).toContain(":project:");
+    await expect(readFile(projectConfigPath, "utf-8")).resolves.toContain('thinking = "high"');
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'thinking = "low"',
+    );
+    expect(firstContentText(result)).toContain("Project Tool Configuration");
+    expect(firstContentText(result).match(/Diagnostics:/g)).toHaveLength(1);
+    expect(result.details).toMatchObject({ thinkingWrite: { target: "project" } });
+    expect(result.details).not.toHaveProperty("rerun");
+  });
+
+  it("defaults the thinking Configuration Write Target to global when project config does not own effective thinking", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-thinking-global-target-"));
+    const workspacePath = join(root, "home", ".pi", "lambda-rlm");
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(workspacePath, { recursive: true });
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(join(workspacePath, "config.toml"), '[leaf]\nthinking = "low"\n', "utf-8");
+    await writeFile(projectConfigPath, "[run]\nmax_model_calls = 99\n", "utf-8");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          if (selections.length === 1) {
+            return "change_formal_leaf_thinking";
+          }
+          if (selections.length === 2) {
+            return "high";
+          }
+          return "global";
+        },
+      },
+    });
+
+    expect(selections[2]).toContain("Configuration Write Target");
+    expect(selections[2]).toContain(":global:");
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'thinking = "high"',
+    );
+    await expect(readFile(projectConfigPath, "utf-8")).resolves.toContain("max_model_calls = 99");
+    await expect(readFile(projectConfigPath, "utf-8")).resolves.not.toContain("high");
+    expect(firstContentText(result)).toContain("Global Tool Configuration");
+    expect(result.details).toMatchObject({ thinkingWrite: { target: "global" } });
+    expect(result.details).not.toHaveProperty("rerun");
+  });
+
   it("supports in-flow manual Formal Leaf model entry, writes the global config by default, and reruns diagnostics", async () => {
     const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-model-flow-"));
     const workspacePath = join(root, ".pi", "lambda-rlm");

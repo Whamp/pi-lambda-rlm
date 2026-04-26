@@ -46,7 +46,7 @@ export type ConfigSource = "default" | "global" | "project";
 export interface LambdaRlmConfigSourceReport {
   paths: { global: string; project: string };
   exists: { global: boolean; project: boolean };
-  leaf: { model: ConfigSource };
+  leaf: { model: ConfigSource; thinking: ConfigSource };
 }
 
 export type ConfigWithSourcesResult = ConfigResult<{
@@ -103,14 +103,16 @@ const CONFIG_FIELDS = new Set<keyof RunConfig>([
   "modelProcessConcurrency",
 ]);
 
-const LEAF_THINKING_VALUES = new Set<LeafThinking>([
+export const LEAF_THINKING_VALUES = [
   "off",
   "minimal",
   "low",
   "medium",
   "high",
   "xhigh",
-]);
+] as const satisfies readonly LeafThinking[];
+
+export const LEAF_THINKING_VALUE_SET = new Set<LeafThinking>(LEAF_THINKING_VALUES);
 
 function validationError(code: string, message: string, field: string): ConfigValidationError {
   return { code, field, message, type: "validation" };
@@ -246,7 +248,7 @@ function parseLeafAssignment(args: {
       ok: false as const,
     };
   }
-  if (configKey === "thinking" && !LEAF_THINKING_VALUES.has(value as LeafThinking)) {
+  if (configKey === "thinking" && !LEAF_THINKING_VALUE_SET.has(value as LeafThinking)) {
     return {
       error: validationError(
         "invalid_config_value",
@@ -415,7 +417,7 @@ export async function resolveLambdaRlmConfigWithSources(
   const exists = { global: false, project: false };
   const sources: LambdaRlmConfigSourceReport = {
     exists,
-    leaf: { model: "default" },
+    leaf: { model: "default", thinking: "default" },
     paths: { global: globalConfigPath, project: projectConfigPath },
   };
 
@@ -439,6 +441,9 @@ export async function resolveLambdaRlmConfigWithSources(
     }
     if (parsed.overlay.leaf.model) {
       sources.leaf.model = source;
+    }
+    if (parsed.overlay.leaf.thinking) {
+      sources.leaf.thinking = source;
     }
     config = applyOverlay(config, parsed.overlay);
   }
