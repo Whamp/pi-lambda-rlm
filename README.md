@@ -2,107 +2,166 @@
 
 `lambda_rlm` is an **agent-invoked Pi tool** for asking questions over files that are too large, too numerous, or too awkward to paste into the parent agent conversation.
 
-Beginner version: give the Pi Agent **file path(s)** plus a **question**. The tool reads those files internally, runs vendored Lambda-RLM through a Python bridge, services Lambda-RLM model callbacks with constrained child Pi calls, and returns a bounded answer.
+Beginner version: install the Pi package, choose a child Pi model in `~/.pi/lambda-rlm/config.toml`, run `/lambda-rlm-doctor`, then ask Pi a question that references one or more file paths. The agent decides when calling `lambda_rlm` is better than reading those files directly.
 
-It is **not a user command, provider, or benchmark harness**. It is a Pi extension tool that an agent chooses when ordinary file reading would waste the parent agent context budget.
+It is **not a provider or benchmark harness**. It is also not something most users call by hand. It is a Pi extension tool that protects the parent agent context budget by doing long-context file work behind a tool boundary.
 
 Last reviewed: 2026-04-25.
 
-## Table of contents
+## Quick start for users
 
-- [Why this exists](#why-this-exists)
-- [When to use it](#when-to-use-it)
-- [Quick start](#quick-start)
-- [How the tool is called](#how-the-tool-is-called)
-- [Context-budget invariant](#context-budget-invariant)
-- [Configuration with `config.toml`](#configuration-with-configtoml)
-- [Prompt overlays](#prompt-overlays)
-- [Examples](#examples)
-- [What a run returns](#what-a-run-returns)
-- [Project layout](#project-layout)
-- [Verification](#verification)
-- [Pi extension entrypoint and dogfooding](#pi-extension-entrypoint-and-dogfooding)
-- [MVP non-goals](#mvp-non-goals)
-- [Credits and acknowledgements](#credits-and-acknowledgements)
+### 1. Install the Pi package
 
-## Why this exists
-
-Pi agents often need to answer questions like:
-
-- “What changed across these long notes?”
-- “Which invariant is described in this large design file?”
-- “Summarize these several source documents without dumping them into chat.”
-
-A normal agent can read files directly, but that can flood the parent agent context. `lambda_rlm` protects that context by moving the long-context work behind a tool boundary.
-
-The tool’s job is to:
-
-1. accept path-based input from the Pi Agent;
-2. read source files internally;
-3. assemble a source manifest for multi-file runs;
-4. run Lambda-RLM’s recursive long-context reasoning path;
-5. answer with compact visible output and structured metadata.
-
-## When to use it
-
-Use `lambda_rlm` when the Pi Agent needs a bounded answer from one or more UTF-8 text files and ordinary context loading is a poor fit.
-
-Good fits:
-
-- question answering over a large file;
-- question answering over multiple related files;
-- synthesis across long research notes;
-- keeping source material out of the parent agent context.
-
-Poor fits:
-
-- tiny files where normal `read` is simpler;
-- interactive user commands;
-- benchmarking Lambda-RLM methods;
-- provider/model integration experiments;
-- arbitrary prompt execution without source files.
-
-## Quick start
-
-Prerequisites:
-
-- Node.js and npm;
-- Python 3 available as `python3`;
-- the Pi CLI available as `pi` for real Formal Leaf calls;
-- local Pi model/auth setup for explicit real smoke tests.
-
-From the repository root:
+From a local checkout:
 
 ```bash
-npm ci
-npm run typecheck
-npm test
+pi install /absolute/path/to/pi-lambda-rlm
 ```
 
-Check that the Python bridge and vendored Python package parse:
+From a git source:
 
 ```bash
-python3 -m py_compile .pi/extensions/lambda-rlm/bridge.py $(find .pi/extensions/lambda-rlm/rlm -name '*.py' -type f | sort)
+pi install git:github.com/Whamp/pi-lambda-rlm
 ```
 
-Inside Pi, run the non-mutating diagnostic command:
+By default, `pi install` writes to global Pi settings at `~/.pi/agent/settings.json`, so the extension is available in all Pi sessions. Use `pi install -l ...` only if you want a project-local install.
+
+After installing, start a new Pi session or run:
+
+```text
+/reload
+```
+
+### 2. Choose the Formal Leaf model
+
+`lambda_rlm` services Lambda-RLM model callbacks by spawning constrained child Pi processes. Those child calls need an explicit Pi model.
+
+Create `~/.pi/lambda-rlm/config.toml`:
+
+```bash
+mkdir -p ~/.pi/lambda-rlm
+cat > ~/.pi/lambda-rlm/config.toml <<'EOF'
+[leaf]
+# Use an exact model accepted by `pi --model`, normally <provider>/<model-id>.
+model = "google/gemini-3-flash-preview"
+
+# Optional. Defaults shown.
+thinking = "off"
+pi_executable = "pi"
+
+[run]
+# Optional run controls. Defaults shown.
+max_input_bytes = 1200000
+output_max_bytes = 51200
+output_max_lines = 2000
+max_model_calls = 1000
+whole_run_timeout_ms = 300000
+model_call_timeout_ms = 60000
+model_process_concurrency = 2
+EOF
+```
+
+Pick a model that already works in Pi. Useful ways to find one:
+
+```bash
+pi --list-models
+```
+
+or open `/model` inside Pi.
+
+### 3. Make sure Pi can authenticate that model
+
+For built-in cloud providers, use `/login` in Pi or set the provider API key. Pi stores credentials in `~/.pi/agent/auth.json`.
+
+For local or proxy providers such as Ollama, vLLM, LM Studio, or a custom OpenAI-compatible endpoint, add the provider/model to `~/.pi/agent/models.json`, then use that provider/model in `[leaf].model`.
+
+Example local provider shape:
+
+```json
+{
+  "providers": {
+    "local-vllm": {
+      "baseUrl": "http://localhost:8000/v1",
+      "api": "openai-completions",
+      "apiKey": "local-key",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false
+      },
+      "models": [
+        { "id": "qwen3-coder" }
+      ]
+    }
+  }
+}
+```
+
+Then use:
+
+```toml
+[leaf]
+model = "local-vllm/qwen3-coder"
+```
+
+### 4. Run the doctor
+
+Inside Pi:
 
 ```text
 /lambda-rlm-doctor
 ```
 
-The doctor checks Python availability, vendored Lambda-RLM imports, local fork seams, TOML configuration, prompt overlays, Pi executable availability, Formal Leaf command shape, and a mock bridge run.
+The doctor is non-mutating. It checks:
 
-Optional real smoke test, only when the local Pi CLI and configured local model endpoint are available:
+- Python availability;
+- vendored Lambda-RLM importability and local fork seams;
+- `~/.pi/lambda-rlm/config.toml` and project `.pi/lambda-rlm/config.toml` syntax;
+- required `[leaf].model` setup;
+- Pi executable availability;
+- Formal Leaf command shape;
+- prompt overlays;
+- a deterministic mock bridge run that does not spend model credits.
 
-```bash
-cp .env.example .env
-# Edit .env and set LAMBDA_RLM_LEAF_MODEL to a model pattern accepted by `pi --model`,
-# normally <provider>/<model-id>.
-npm run test:pi-leaf-smoke
+If the doctor reports a `leaf_model` error, fix `[leaf].model`, Pi credentials, or `~/.pi/agent/models.json`, then rerun it.
+
+### 5. Use it naturally
+
+Ask Pi questions like:
+
+```text
+What changed across docs/research/a.md and docs/research/b.md? Use lambda_rlm if reading both files would waste context.
 ```
 
-`.env` is gitignored so machine-specific local model names and secrets stay out of the public repo.
+or:
+
+```text
+Answer this from @large-notes.md without pasting the whole file into our conversation.
+```
+
+The agent should call `lambda_rlm` with paths and a question when it needs bounded long-context file reasoning.
+
+## What gets installed
+
+This package declares itself as a Pi package with this extension entrypoint:
+
+```text
+.pi/extensions/lambda-rlm/index.ts
+```
+
+Runtime assets are included under:
+
+```text
+.pi/extensions/lambda-rlm/
+  bridge.py
+  prompts/
+  prompt-templates/
+  rlm/
+```
+
+The extension registers:
+
+- the `lambda_rlm` tool, available to the agent;
+- the `/lambda-rlm-doctor` command, available to you.
 
 ## How the tool is called
 
@@ -150,55 +209,30 @@ Rules:
 - Optional per-run limits can only make resolved limits smaller or equal.
 - There is **no inline source or raw prompt** public contract. Inline source text, raw prompt strings, and ad hoc provider inputs are rejected before execution.
 
-## Context-budget invariant
+## Configuration reference
 
-The product invariant is **Agent Context Avoidance**.
-
-That means the Pi Agent passes only file references and a question. `lambda_rlm` reads the source contents internally, builds the Lambda-RLM input internally, and returns only bounded output plus compact details.
-
-For `contextPaths`, the internal context starts with a source manifest and then wraps each file in source-delimited sections:
-
-```text
-Sources:
-[1] path/to/a.txt (123 bytes)
-[2] path/to/b.txt (456 bytes)
-
---- BEGIN SOURCE 1: path/to/a.txt ---
-...
---- END SOURCE 1 ---
-
---- BEGIN SOURCE 2: path/to/b.txt ---
-...
---- END SOURCE 2 ---
-```
-
-The parent agent should not receive full source contents, full prompt bodies, or huge execution traces by default.
-
-## Configuration with `config.toml`
-
-Run-control defaults resolve as sparse TOML overlays in this order:
+Configuration resolves as sparse overlays in this order:
 
 1. built-in defaults;
 2. global config at `~/.pi/lambda-rlm/config.toml`;
 3. project config at `<cwd>/.pi/lambda-rlm/config.toml`;
-4. per-run tightening from the tool call.
+4. per-run tightening from the tool call for supported `[run]` limits only.
 
-Project configuration is inside the project trust boundary, so it may freely override global defaults for that project. Per-run tool parameters may only tighten the resolved values.
+Project configuration is inside the project trust boundary, so it may override global defaults for that project.
 
-Minimal shape:
+### `[leaf]` keys
 
-```toml
-[run]
-max_input_bytes = 1200000
-output_max_bytes = 51200
-output_max_lines = 2000
-max_model_calls = 1000
-whole_run_timeout_ms = 300000
-model_call_timeout_ms = 60000
-model_process_concurrency = 2
-```
+`[leaf].model` is the important user setup step.
 
-Supported `[run]` keys:
+| TOML key | Required? | Meaning |
+| --- | --- | --- |
+| `model` | yes for real installed use | Pi model pattern passed to child `pi --model`, normally `<provider>/<model-id>`. |
+| `thinking` | optional | Child Pi thinking level: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Default: `off`. |
+| `pi_executable` | optional | Pi executable for child calls. Default: `pi`. |
+
+For development smoke tests, use the same config path. If you want smoke tests to use a different model than your global setup, create a project-local `.pi/lambda-rlm/config.toml` with its own `[leaf].model`.
+
+### `[run]` keys
 
 | TOML key | Meaning |
 | --- | --- |
@@ -210,7 +244,7 @@ Supported `[run]` keys:
 | `model_call_timeout_ms` | Timeout for each child Pi Formal Leaf call. |
 | `model_process_concurrency` | Number of child Pi model processes allowed at once in one extension instance. |
 
-Invalid TOML, unknown tables, unknown keys, duplicate keys, and non-positive values fail before execution with structured validation details.
+Invalid TOML, unknown tables, unknown keys, duplicate keys, non-positive `[run]` values, and invalid `[leaf]` values fail before execution with structured validation details.
 
 ## Prompt overlays
 
@@ -255,17 +289,29 @@ Copyable prompt examples live in:
 
 Those templates are **manual copy only**. Runtime loading never creates or mutates operator-owned prompt overlays.
 
-## Examples
+## Context-budget invariant
 
-Small fixtures are included so reviewers can understand the intended tool shape without committing large generated outputs.
+The product invariant is **Agent Context Avoidance**.
 
-| Example | Use when | Files |
-| --- | --- | --- |
-| Single-file QA | One question over one file | `examples/single-file-qa/` |
-| Multi-file QA | One question needs evidence from several files | `examples/multi-file-qa/` |
-| Long-context synthesis | Several notes should be consolidated into one answer | `examples/synthesis/` |
+That means the Pi Agent passes only file references and a question. `lambda_rlm` reads the source contents internally, builds the Lambda-RLM input internally, and returns only bounded output plus compact details.
 
-See also `docs/manual-review-checkpoint.md` for lightweight output quality criteria: usefulness, boundedness, and clarity.
+For `contextPaths`, the internal context starts with a source manifest and then wraps each file in source-delimited sections:
+
+```text
+Sources:
+[1] path/to/a.txt (123 bytes)
+[2] path/to/b.txt (456 bytes)
+
+--- BEGIN SOURCE 1: path/to/a.txt ---
+...
+--- END SOURCE 1 ---
+
+--- BEGIN SOURCE 2: path/to/b.txt ---
+...
+--- END SOURCE 2 ---
+```
+
+The parent agent should not receive full source contents, full prompt bodies, or huge execution traces by default.
 
 ## What a run returns
 
@@ -289,86 +335,79 @@ Structured details include compact metadata such as:
 
 A failed run marks the answer as non-authoritative. Validation failures happen before execution. Runtime failures may include sanitized partial details, but the visible response should not present a partial answer as final.
 
-## Project layout
+## Troubleshooting
 
-```text
-src/
-  extension.ts          # Pi extension registration, tool schema, doctor command
-  lambda-rlm-tool.ts    # public tool validation, source loading, config/prompt resolution
-  bridge-runner.ts      # NDJSON bridge process orchestration
-  leaf-runner.ts        # constrained child Pi Formal Leaf calls
-  config-resolver.ts    # sparse TOML config overlays
-  prompt-resolver.ts    # built-in/global/project prompt overlays
-  result-formatter.ts   # bounded visible output and structured details
+### `/lambda-rlm-doctor` says `leaf_model` is missing
 
-.pi/extensions/lambda-rlm/
-  index.ts              # project-local extension entrypoint
-  bridge.py             # Python bridge into vendored Lambda-RLM
-  prompts/              # built-in prompt defaults
-  prompt-templates/     # copyable prompt overlay templates
-  rlm/                  # vendored local/forked Lambda-RLM package
+Create or update `~/.pi/lambda-rlm/config.toml`:
 
-examples/               # tiny reviewable tool-call fixtures
-docs/                   # smoke-test notes, future work, manual review checkpoint
-tests/                  # Vitest behavior tests plus an explicit real smoke suite
+```toml
+[leaf]
+model = "<provider>/<model-id>"
 ```
 
-## Verification
+Use a model shown by `/model` or `pi --list-models`.
 
-Common development commands:
+### The model exists but doctor says credentials are missing
 
-```bash
-npm test                    # run hermetic Vitest behavior tests
-npm run typecheck           # run TypeScript type checking without emitting files
-npm run test:pi-leaf-smoke  # run real local child Pi and end-to-end QA smoke tests
+Authenticate the provider with `/login`, an environment variable, or `~/.pi/agent/auth.json`.
+
+### A local model is not found
+
+Add it to `~/.pi/agent/models.json`, confirm `pi --model provider/model-id "hello"` works, then rerun `/lambda-rlm-doctor`.
+
+### Runs time out or spawn too many child processes
+
+Lower or raise these values in `~/.pi/lambda-rlm/config.toml` or project `.pi/lambda-rlm/config.toml`:
+
+```toml
+[run]
+model_call_timeout_ms = 60000
+whole_run_timeout_ms = 300000
+model_process_concurrency = 2
 ```
 
-Python checks:
+## Examples
+
+Small fixtures are included so users can see intended tool-call shapes without committing large generated outputs.
+
+| Example | Use when | Files |
+| --- | --- | --- |
+| Single-file QA | One question over one file | `examples/single-file-qa/` |
+| Multi-file QA | One question needs evidence from several files | `examples/multi-file-qa/` |
+| Long-context synthesis | Several notes should be consolidated into one answer | `examples/synthesis/` |
+
+See also `docs/manual-review-checkpoint.md` for lightweight output quality criteria: usefulness, boundedness, and clarity.
+
+## Development notes
+
+Most users can ignore this section.
+
+From a checkout:
 
 ```bash
-python3 -m unittest discover -s tests/python -v
+npm ci
+npm test
+npm run typecheck
 python3 -m py_compile .pi/extensions/lambda-rlm/bridge.py $(find .pi/extensions/lambda-rlm/rlm -name '*.py' -type f | sort)
 ```
 
-Real smoke tests are separate from `npm test` because they require the local Pi CLI and model endpoint:
+Real smoke tests require a working Pi model in `~/.pi/lambda-rlm/config.toml` or project `.pi/lambda-rlm/config.toml`:
+
+```toml
+[leaf]
+model = "<provider>/<model-id>"
+```
+
+Then run:
 
 ```bash
-cp .env.example .env
-# Edit .env and set LAMBDA_RLM_LEAF_MODEL to a model pattern accepted by `pi --model`,
-# normally <provider>/<model-id>.
 npm run test:pi-leaf-smoke
 ```
 
-`.env` is gitignored so machine-specific local model names and secrets stay out of the public repo.
-
-The smoke suite covers:
-
-1. one tiny constrained child Pi Formal Leaf call;
-2. one tiny end-to-end QA run through `lambda_rlm`, the Python bridge, vendored Lambda-RLM, and child Pi callbacks.
-
-## Pi extension entrypoint and dogfooding
-
-This repository intentionally includes a project-local Pi extension entrypoint:
-
-```text
-.pi/extensions/lambda-rlm/index.ts
-```
-
-Pi auto-discovers `.pi/extensions/*/index.ts` when a Pi coding agent starts in this repository. That means `lambda_rlm` is registered as an available tool even when it has not been installed globally.
-
-This is intentional dogfooding. Ordinary Pi sessions in this repo exercise the same registration path that future users will hit, so schema and runtime problems show up early.
-
-The entrypoint is not a symlink. It re-exports the source implementation:
-
-```ts
-export { default } from "../../../src/extension.js";
-```
-
-After editing extension code, reload or restart Pi so the project-local extension sees the change. Runtime assets such as `bridge.py`, `prompts/`, `prompt-templates/`, and `rlm/` live under `.pi/extensions/lambda-rlm/` as tracked files.
+This repository also includes a project-local dogfooding entrypoint at `.pi/extensions/lambda-rlm/index.ts`. When Pi starts in this checkout, that entrypoint registers `lambda_rlm` even before a global install. After editing extension code, run `/reload` or restart Pi.
 
 Important gotcha: Pi sends registered tool schemas to the active model provider before the agent can answer a prompt. An invalid `lambda_rlm` schema can therefore break unrelated requests in this repository even if the agent never calls the tool. Keep public tool parameter schemas provider-compatible: top-level object schemas only, with conditional rules enforced in runtime validation.
-
-To bypass the dogfooded extension while debugging unrelated work, start Pi with extensions disabled or temporarily rename `.pi/extensions/lambda-rlm/`.
 
 ## MVP non-goals
 

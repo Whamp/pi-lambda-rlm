@@ -4,8 +4,8 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BridgeProtocolError, BridgeRunFailedError, runSyntheticBridge } from "./bridge-runner.js";
 import type { ModelCallRunner } from "./bridge-runner.js";
-import { resolveRunConfig } from "./config-resolver.js";
-import type { RunConfig } from "./config-resolver.js";
+import { resolveLambdaRlmConfig } from "./config-resolver.js";
+import type { LeafConfig, RunConfig } from "./config-resolver.js";
 import { runFormalPiLeafModelCall } from "./leaf-runner.js";
 import type { LeafThinking, ProcessRunner } from "./leaf-runner.js";
 import { ModelCallConcurrencyQueue } from "./model-call-queue.js";
@@ -634,12 +634,12 @@ function perRunConfigOptions(validated: LambdaRlmParams) {
   return perRun;
 }
 
-async function resolveToolRunConfig(
+async function resolveToolConfig(
   validated: LambdaRlmParams,
   options: ExecuteLambdaRlmToolOptions,
   cwd: string,
 ) {
-  const configResult = await resolveRunConfig({
+  const configResult = await resolveLambdaRlmConfig({
     cwd,
     ...(options.homeDir ? { homeDir: options.homeDir } : {}),
     ...(options.globalConfigPath ? { globalConfigPath: options.globalConfigPath } : {}),
@@ -649,16 +649,17 @@ async function resolveToolRunConfig(
   if (!configResult.ok) {
     return { ok: false as const, result: formatValidationFailure(configResult.error) };
   }
-  if (options.outputMaxVisibleChars === undefined) {
-    return { ok: true as const, runConfig: configResult.config };
-  }
-  return {
-    ok: true as const,
-    runConfig: {
-      ...configResult.config,
-      outputMaxBytes: Math.min(configResult.config.outputMaxBytes, options.outputMaxVisibleChars),
-    },
-  };
+  const runConfig =
+    options.outputMaxVisibleChars === undefined
+      ? configResult.config.run
+      : {
+          ...configResult.config.run,
+          outputMaxBytes: Math.min(
+            configResult.config.run.outputMaxBytes,
+            options.outputMaxVisibleChars,
+          ),
+        };
+  return { leafConfig: configResult.config.leaf, ok: true as const, runConfig };
 }
 
 async function resolveToolPrompts(options: ExecuteLambdaRlmToolOptions, cwd: string) {
@@ -726,8 +727,13 @@ function leafTimeoutMs(options: ExecuteLambdaRlmToolOptions, runConfig: RunConfi
   return Math.min(options.leafTimeoutMs, runConfig.modelCallTimeoutMs);
 }
 
+function resolvedLeafModel(options: ExecuteLambdaRlmToolOptions, leafConfig: LeafConfig) {
+  return options.leafModel ?? leafConfig.model;
+}
+
 function modelCallRunnerFor(args: {
   leafModel: string;
+  leafPiExecutable: string;
   leafThinking: LeafThinking;
   modelCallQueue: ModelCallConcurrencyQueue;
   options: ExecuteLambdaRlmToolOptions;
@@ -737,7 +743,7 @@ function modelCallRunnerFor(args: {
   return (call) =>
     args.modelCallQueue.run(call, (queuedCall) =>
       runFormalPiLeafModelCall(queuedCall, {
-        ...(args.options.piExecutable ? { piExecutable: args.options.piExecutable } : {}),
+        piExecutable: args.leafPiExecutable,
         leafModel: args.leafModel,
         leafThinking: args.leafThinking,
         timeoutMs: leafTimeoutMs(args.options, args.runConfig),
@@ -781,6 +787,7 @@ function runBridgeForTool(args: {
   assembledContext: string;
   bridgePath: string;
   leafModel: string;
+  leafPiExecutable: string;
   leafThinking: LeafThinking;
   loadedSources: LoadedSource[];
   modelCallQueue: ModelCallConcurrencyQueue;
@@ -797,6 +804,7 @@ function runBridgeForTool(args: {
     maxModelCalls: args.runConfig.maxModelCalls,
     modelCallRunner: modelCallRunnerFor({
       leafModel: args.leafModel,
+      leafPiExecutable: args.leafPiExecutable,
       leafThinking: args.leafThinking,
       modelCallQueue: args.modelCallQueue,
       options: args.options,
@@ -825,11 +833,11 @@ export async function executeLambdaRlmTool(
   const { validated } = validation;
   const cwd = options.cwd ?? process.cwd();
 
-  const config = await resolveToolRunConfig(validated, options, cwd);
+  const config = await resolveToolConfig(validated, options, cwd);
   if (!config.ok) {
     return config.result;
   }
-  const { runConfig } = config;
+  const { leafConfig, runConfig } = config;
 
   const prompts = await resolveToolPrompts(options, cwd);
   if (!prompts.ok) {
@@ -848,9 +856,17 @@ export async function executeLambdaRlmTool(
     options.bridgePath ??
     fileURLToPath(new URL("../.pi/extensions/lambda-rlm/bridge.py", import.meta.url));
   const runId = `lambda-rlm-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const leafModel =
-    options.leafModel ?? process.env.LAMBDA_RLM_LEAF_MODEL ?? "google/gemini-3-flash-preview";
-  const leafThinking = options.leafThinking ?? "off";
+  const leafModel = resolvedLeafModel(options, leafConfig);
+  if (!leafModel) {
+    return formatValidationFailure({
+      code: "missing_leaf_model",
+      field: "leaf.model",
+      message:
+        'No Formal Leaf model is configured. Add [leaf].model (model = "<provider>/<model-id>") to ~/.pi/lambda-rlm/config.toml or the project .pi/lambda-rlm/config.toml.',
+    });
+  }
+  const leafPiExecutable = options.piExecutable ?? leafConfig.piExecutable;
+  const leafThinking = options.leafThinking ?? leafConfig.thinking;
   const modelCallQueue = modelCallQueueFor(options, runConfig);
   const outputOptions = outputOptionsFor(options, runConfig, runId);
 
@@ -860,6 +876,7 @@ export async function executeLambdaRlmTool(
       assembledContext,
       bridgePath,
       leafModel,
+      leafPiExecutable,
       leafThinking,
       loadedSources,
       modelCallQueue,

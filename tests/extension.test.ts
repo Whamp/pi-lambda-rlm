@@ -1,4 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import registerLambdaRlmExtension from "../src/extension.js";
 import registerLambdaRlmEntrypoint from "../.pi/extensions/lambda-rlm/index.js";
@@ -58,6 +60,18 @@ function sortedStrings(values: Iterable<string>) {
   // ES2022 target: Array#toSorted is unavailable in this project.
   // oxlint-disable-next-line unicorn/no-array-sort
   return sorted.sort();
+}
+
+async function tempConfiguredProject(context = "This project is about Lambda-RLM.") {
+  const cwd = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-project-"));
+  await mkdir(join(cwd, ".pi", "lambda-rlm"), { recursive: true });
+  await writeFile(
+    join(cwd, ".pi", "lambda-rlm", "config.toml"),
+    '[leaf]\nmodel = "google/gemini-test"\n',
+    "utf-8",
+  );
+  await writeFile(join(cwd, "CONTEXT.md"), context, "utf-8");
+  return cwd;
 }
 
 function firstContentText(result: ToolResult) {
@@ -241,13 +255,15 @@ describe("lambda_rlm Pi extension registration", () => {
   it("executes through the registered public tool path", async () => {
     const tool = registeredLambdaRlmTool();
 
+    const cwd = await tempConfiguredProject();
+
     const result = await tool.execute(
       "call-1",
       { contextPath: "CONTEXT.md", question: "What is this project about?" },
       undefined,
       undefined,
       {
-        cwd: process.cwd(),
+        cwd,
         leafProcessRunner: async (invocation) => {
           const promptFile = invocation.args.at(-1);
           const prompt = promptFile?.startsWith("@")
@@ -273,13 +289,15 @@ describe("lambda_rlm Pi extension registration", () => {
     const tool = registeredLambdaRlmTool();
     const started: string[] = [];
 
+    const cwd = await tempConfiguredProject();
+
     const result = await tool.execute(
       "call-budgeted",
       { contextPath: "CONTEXT.md", maxModelCalls: 1, question: "What is this project about?" },
       undefined,
       undefined,
       {
-        cwd: process.cwd(),
+        cwd,
         leafProcessRunner: async (invocation) => {
           const promptFile = invocation.args.at(-1);
           const prompt = promptFile?.startsWith("@")

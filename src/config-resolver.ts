@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { homedir } from "node:os";
+import { join } from "node:path";
 
 export interface RunConfig {
   maxInputBytes: number;
@@ -12,6 +12,22 @@ export interface RunConfig {
   modelProcessConcurrency: number;
 }
 
+export type LeafThinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
+export interface LeafConfig {
+  /** Pi model pattern passed to child `pi --model`, normally `<provider>/<model-id>`. */
+  model?: string;
+  /** Pi executable used for Formal Leaf child calls. */
+  piExecutable: string;
+  /** Thinking level passed to child `pi --thinking`. */
+  thinking: LeafThinking;
+}
+
+export interface LambdaRlmConfig {
+  run: RunConfig;
+  leaf: LeafConfig;
+}
+
 export interface ConfigValidationError {
   type: "validation";
   code: string;
@@ -19,8 +35,8 @@ export interface ConfigValidationError {
   field: string;
 }
 
-export type ConfigResult =
-  | { ok: true; config: RunConfig }
+export type ConfigResult<T = RunConfig> =
+  | { ok: true; config: T }
   | { ok: false; error: ConfigValidationError };
 
 export const DEFAULT_RUN_CONFIG: RunConfig = {
@@ -33,10 +49,20 @@ export const DEFAULT_RUN_CONFIG: RunConfig = {
   wholeRunTimeoutMs: 300_000,
 };
 
-type Overlay = Partial<RunConfig>;
+export const DEFAULT_LEAF_CONFIG: LeafConfig = {
+  piExecutable: "pi",
+  thinking: "off",
+};
+
+type RunOverlay = Partial<RunConfig>;
+type LeafOverlay = Partial<LeafConfig>;
+interface LambdaRlmOverlay {
+  run: RunOverlay;
+  leaf: LeafOverlay;
+}
 type PerRun = Partial<RunConfig>;
 
-const TOML_TO_CONFIG: Record<string, keyof RunConfig> = {
+const TOML_TO_RUN_CONFIG: Record<string, keyof RunConfig> = {
   max_input_bytes: "maxInputBytes",
   max_model_calls: "maxModelCalls",
   model_call_timeout_ms: "modelCallTimeoutMs",
@@ -44,6 +70,12 @@ const TOML_TO_CONFIG: Record<string, keyof RunConfig> = {
   output_max_bytes: "outputMaxBytes",
   output_max_lines: "outputMaxLines",
   whole_run_timeout_ms: "wholeRunTimeoutMs",
+};
+
+const TOML_TO_LEAF_CONFIG: Record<string, keyof LeafConfig> = {
+  model: "model",
+  pi_executable: "piExecutable",
+  thinking: "thinking",
 };
 
 const CONFIG_FIELDS = new Set<keyof RunConfig>([
@@ -54,6 +86,15 @@ const CONFIG_FIELDS = new Set<keyof RunConfig>([
   "wholeRunTimeoutMs",
   "modelCallTimeoutMs",
   "modelProcessConcurrency",
+]);
+
+const LEAF_THINKING_VALUES = new Set<LeafThinking>([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
 ]);
 
 function validationError(code: string, message: string, field: string): ConfigValidationError {
@@ -76,12 +117,132 @@ function stripComment(line: string) {
   return (hash === -1 ? line : line.slice(0, hash)).trim();
 }
 
+function parseStringValue(raw: string, source: "global" | "project", lineNumber: number) {
+  const match = /^"([^"]*)"$/.exec(raw.trim());
+  if (!match) {
+    return {
+      error: validationError(
+        "invalid_toml",
+        `Invalid TOML syntax in ${source} config at line ${lineNumber}. Expected a quoted string value.`,
+        `line ${lineNumber}`,
+      ),
+      ok: false as const,
+    };
+  }
+  return { ok: true as const, value: match[1] ?? "" };
+}
+
+function parsePositiveIntegerValue(
+  raw: string,
+  source: "global" | "project",
+  lineNumber: number,
+  field: string,
+) {
+  if (!/^[0-9]+$/.test(raw.trim())) {
+    return {
+      error: validationError(
+        "invalid_toml",
+        `Invalid TOML syntax in ${source} config at line ${lineNumber}. Expected ${field} = positive_integer for [run] values.`,
+        `run.${field}`,
+      ),
+      ok: false as const,
+    };
+  }
+  const value = Number(raw.trim());
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    return {
+      error: validationError(
+        "invalid_config_value",
+        `[run].${field} must be a positive safe integer.`,
+        `run.${field}`,
+      ),
+      ok: false as const,
+    };
+  }
+  return { ok: true as const, value };
+}
+
+function parseRunAssignment(args: {
+  key: string;
+  rawValue: string;
+  source: "global" | "project";
+  lineNumber: number;
+  overlay: LambdaRlmOverlay;
+}) {
+  const configKey = TOML_TO_RUN_CONFIG[args.key];
+  if (!configKey) {
+    return {
+      error: validationError(
+        "unknown_config_key",
+        `Unknown [run] key ${args.key}. Supported keys: max_input_bytes, output_max_bytes, output_max_lines, max_model_calls, whole_run_timeout_ms, model_call_timeout_ms, model_process_concurrency.`,
+        `run.${args.key}`,
+      ),
+      ok: false as const,
+    };
+  }
+
+  const parsed = parsePositiveIntegerValue(args.rawValue, args.source, args.lineNumber, args.key);
+  if (!parsed.ok) {
+    return parsed;
+  }
+  args.overlay.run[configKey] = parsed.value;
+  return { ok: true as const };
+}
+
+function parseLeafAssignment(args: {
+  key: string;
+  rawValue: string;
+  source: "global" | "project";
+  lineNumber: number;
+  overlay: LambdaRlmOverlay;
+}) {
+  const configKey = TOML_TO_LEAF_CONFIG[args.key];
+  if (!configKey) {
+    return {
+      error: validationError(
+        "unknown_config_key",
+        `Unknown [leaf] key ${args.key}. Supported keys: model, thinking, pi_executable.`,
+        `leaf.${args.key}`,
+      ),
+      ok: false as const,
+    };
+  }
+
+  const parsed = parseStringValue(args.rawValue, args.source, args.lineNumber);
+  if (!parsed.ok) {
+    return parsed;
+  }
+  const value = parsed.value.trim();
+  if (!value) {
+    return {
+      error: validationError(
+        "invalid_config_value",
+        `[leaf].${args.key} must be a non-empty string.`,
+        `leaf.${args.key}`,
+      ),
+      ok: false as const,
+    };
+  }
+  if (configKey === "thinking" && !LEAF_THINKING_VALUES.has(value as LeafThinking)) {
+    return {
+      error: validationError(
+        "invalid_config_value",
+        `[leaf].thinking must be one of: off, minimal, low, medium, high, xhigh.`,
+        "leaf.thinking",
+      ),
+      ok: false as const,
+    };
+  }
+  args.overlay.leaf[configKey] = value as never;
+  return { ok: true as const };
+}
+
 export function parseConfigToml(
   toml: string,
   source: "global" | "project" = "global",
-): { ok: true; overlay: Overlay } | { ok: false; error: ConfigValidationError } {
-  const overlay: Overlay = {};
-  let table: string | undefined;
+): { ok: true; overlay: LambdaRlmOverlay } | { ok: false; error: ConfigValidationError } {
+  const overlay: LambdaRlmOverlay = { leaf: {}, run: {} };
+  let table: "run" | "leaf" | undefined;
   const seenTables = new Set<string>();
   const seenKeys = new Set<string>();
   const lines = toml.split(/\r?\n/);
@@ -96,20 +257,17 @@ export function parseConfigToml(
     const tableMatch = /^\[([A-Za-z0-9_-]+)]$/.exec(line);
     if (tableMatch) {
       const [, tableName] = tableMatch;
-      if (tableName === undefined) {
-        continue;
-      }
-      table = tableName;
-      if (table !== "run") {
+      if (tableName !== "run" && tableName !== "leaf") {
         return {
           error: validationError(
             "unknown_config_key",
-            `Unknown TOML table [${table}] in ${source} config. Only [run] is supported.`,
-            `[${table}]`,
+            `Unknown TOML table [${tableName}] in ${source} config. Only [run] and [leaf] are supported.`,
+            `[${tableName}]`,
           ),
           ok: false,
         };
       }
+      table = tableName;
       if (seenTables.has(table)) {
         return {
           error: validationError(
@@ -124,22 +282,22 @@ export function parseConfigToml(
       continue;
     }
 
-    const assignment = /^([A-Za-z0-9_-]+)\s*=\s*([0-9]+)$/.exec(line);
+    const assignment = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(line);
     if (!assignment) {
       return {
         error: validationError(
           "invalid_toml",
-          `Invalid TOML syntax in ${source} config at line ${lineNumber}. Expected [run] or key = positive_integer.`,
+          `Invalid TOML syntax in ${source} config at line ${lineNumber}. Expected [run], [leaf], or key = value.`,
           `line ${lineNumber}`,
         ),
         ok: false,
       };
     }
-    if (table !== "run") {
+    if (!table) {
       return {
         error: validationError(
           "invalid_toml",
-          `Config key ${assignment[1]} must be inside a [run] table.`,
+          `Config key ${assignment[1]} must be inside a [run] or [leaf] table.`,
           assignment[1] ?? `line ${lineNumber}`,
         ),
         ok: false,
@@ -147,48 +305,37 @@ export function parseConfigToml(
     }
 
     const tomlKey = assignment[1] ?? "";
-    const configKey = TOML_TO_CONFIG[tomlKey];
-    if (!configKey) {
-      return {
-        error: validationError(
-          "unknown_config_key",
-          `Unknown [run] key ${tomlKey}. Supported keys: max_input_bytes, output_max_bytes, output_max_lines, max_model_calls, whole_run_timeout_ms, model_call_timeout_ms, model_process_concurrency.`,
-          `run.${tomlKey}`,
-        ),
-        ok: false,
-      };
-    }
-    if (seenKeys.has(tomlKey)) {
+    const seenKey = `${table}.${tomlKey}`;
+    if (seenKeys.has(seenKey)) {
       return {
         error: validationError(
           "invalid_toml",
-          `Duplicate [run] key ${tomlKey} in ${source} config at line ${lineNumber}.`,
-          `run.${tomlKey}`,
+          `Duplicate [${table}] key ${tomlKey} in ${source} config at line ${lineNumber}.`,
+          `${table}.${tomlKey}`,
         ),
         ok: false,
       };
     }
-    seenKeys.add(tomlKey);
+    seenKeys.add(seenKey);
 
-    const value = Number(assignment[2]);
-    if (!Number.isSafeInteger(value) || value <= 0) {
-      return {
-        error: validationError(
-          "invalid_config_value",
-          `[run].${tomlKey} must be a positive safe integer.`,
-          `run.${tomlKey}`,
-        ),
-        ok: false,
-      };
+    const rawValue = assignment[2] ?? "";
+    const parsed =
+      table === "run"
+        ? parseRunAssignment({ key: tomlKey, lineNumber, overlay, rawValue, source })
+        : parseLeafAssignment({ key: tomlKey, lineNumber, overlay, rawValue, source });
+    if (!parsed.ok) {
+      return parsed;
     }
-    overlay[configKey] = value;
   }
 
   return { ok: true, overlay };
 }
 
-function applyOverlay(base: RunConfig, overlay: Overlay): RunConfig {
-  return { ...base, ...overlay };
+function applyOverlay(base: LambdaRlmConfig, overlay: LambdaRlmOverlay): LambdaRlmConfig {
+  return {
+    leaf: { ...base.leaf, ...overlay.leaf },
+    run: { ...base.run, ...overlay.run },
+  };
 }
 
 function normalizePerRun(
@@ -218,7 +365,7 @@ function normalizePerRun(
   return { ok: true, perRun: out };
 }
 
-export async function resolveRunConfig(
+export async function resolveLambdaRlmConfig(
   args: {
     cwd?: string;
     homeDir?: string;
@@ -226,14 +373,14 @@ export async function resolveRunConfig(
     projectConfigPath?: string;
     perRun?: Record<string, unknown>;
   } = {},
-): Promise<ConfigResult> {
+): Promise<ConfigResult<LambdaRlmConfig>> {
   const cwd = args.cwd ?? process.cwd();
   const homeDir = args.homeDir ?? homedir();
   const globalConfigPath =
     args.globalConfigPath ?? join(homeDir, ".pi", "lambda-rlm", "config.toml");
   const projectConfigPath = args.projectConfigPath ?? join(cwd, ".pi", "lambda-rlm", "config.toml");
 
-  let config = DEFAULT_RUN_CONFIG;
+  let config: LambdaRlmConfig = { leaf: DEFAULT_LEAF_CONFIG, run: DEFAULT_RUN_CONFIG };
   for (const [source, path] of [
     ["global", globalConfigPath],
     ["project", projectConfigPath],
@@ -254,18 +401,34 @@ export async function resolveRunConfig(
     return perRun;
   }
   for (const [field, value] of Object.entries(perRun.perRun) as [keyof RunConfig, number][]) {
-    if (value > config[field]) {
+    if (value > config.run[field]) {
       return {
         error: validationError(
           "per_run_limit_loosened",
-          `${field}=${value} would loosen the resolved limit ${config[field]}. Per-run options may only tighten limits.`,
+          `${field}=${value} would loosen the resolved limit ${config.run[field]}. Per-run options may only tighten limits.`,
           field,
         ),
         ok: false,
       };
     }
-    config = { ...config, [field]: value };
+    config = { ...config, run: { ...config.run, [field]: value } };
   }
 
   return { config, ok: true };
+}
+
+export async function resolveRunConfig(
+  args: {
+    cwd?: string;
+    homeDir?: string;
+    globalConfigPath?: string;
+    projectConfigPath?: string;
+    perRun?: Record<string, unknown>;
+  } = {},
+): Promise<ConfigResult<RunConfig>> {
+  const result = await resolveLambdaRlmConfig(args);
+  if (!result.ok) {
+    return result;
+  }
+  return { config: result.config.run, ok: true };
 }

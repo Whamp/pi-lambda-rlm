@@ -88,6 +88,58 @@ _Avoid_: Ad hoc guardrails, hidden implementation defaults
 A durable TOML configuration source for the **Run Control Policy** and default leaf execution settings.
 _Avoid_: Prompt-only policy, hard-coded-only policy, JSON config
 
+**Lambda-RLM User Workspace**:
+The extension-owned user workspace at `~/.pi/lambda-rlm/` for global Lambda-RLM configuration, examples, operator-owned prompt overlays, and lightweight onboarding notes.
+_Avoid_: Package install directory, Pi agent settings directory, hidden cache only
+
+**Workspace Scaffolding**:
+Non-destructive creation of missing files in the **Lambda-RLM User Workspace**, such as a valid sparse `config.toml` skeleton without a selected model, copied example fixtures, and a short README.
+_Avoid_: Overwriting user-owned config, auto-selecting a billable model, auto-seeding prompt overlays
+
+**Transparent Sparse Config Scaffold**:
+The scaffolded `config.toml` style where required or intentionally active values are uncommented, while built-in run-control defaults are shown as commented documentation rather than copied as active overrides.
+_Avoid_: Opaque missing config, stale full default config, uncommented placeholder model
+
+**Scaffold Notification**:
+A one-time, soft user notification emitted only when **Workspace Scaffolding** first creates the **Lambda-RLM User Workspace**, pointing the user to `/lambda-rlm-doctor`.
+_Avoid_: Repeated reload noise, blocking setup wizard, silent first-run confusion
+
+**Copied Example Fixtures**:
+Onboarding examples copied into `~/.pi/lambda-rlm/examples/` during **Workspace Scaffolding** so users can inspect, edit, and run them without finding the package install path.
+_Avoid_: Runtime prompt defaults, package-owned immutable examples, generated benchmark outputs
+
+**Doctor Command**:
+The user-facing `/lambda-rlm-doctor` command that checks setup readiness and acts as the in-flow configuration surface for the **Lambda-RLM Tool**.
+_Avoid_: One-time init command, agent-invoked tool, package installer
+
+**Doctor Repair Flow**:
+An interactive, user-consented mutation offered by the **Doctor Command** after diagnostics, such as choosing or changing the Formal Leaf model and writing that choice to the **Tool Configuration File**.
+_Avoid_: Silent repair, hidden install-time mutation, separate one-time init workflow
+
+**Diagnostic-Only Doctor Mode**:
+The **Doctor Command** behavior when interactive UI is unavailable: run checks, report readiness, and print exact manual config steps without prompting or mutating files.
+_Avoid_: Broken prompt flow, attempted hidden repair, requiring TUI interaction
+
+**Formal Leaf Model Selection**:
+The user's choice of Pi model pattern for **Constrained Pi Leaf Calls**, stored as `[leaf].model` in a **Tool Configuration File** chosen by the **Doctor Repair Flow**.
+_Avoid_: Current parent-agent model, automatic expensive default, provider API key
+
+**Formal Leaf Thinking Selection**:
+The user's optional tuning choice for `[leaf].thinking`, offered as a secondary **Doctor Command** action rather than part of the required readiness path.
+_Avoid_: Required setup, hidden cost increase, parent-agent thinking setting
+
+**Configuration Write Target**:
+The specific **Tool Configuration File** the **Doctor Repair Flow** mutates when writing **Formal Leaf Model Selection** changes.
+_Avoid_: Always writing project config, silently bypassing existing project override, mutating Pi agent settings
+
+**Targeted Config Edit**:
+A minimal, comment-preserving edit to a user-owned **Tool Configuration File**, such as updating an existing `[leaf].model`, uncommenting a skeleton model line, appending `model = "..."` inside `[leaf]`, or adding `[leaf]` when missing.
+_Avoid_: Normalized rewrite by default, losing comments, reordering user config
+
+**Candidate Leaf Model Set**:
+The ordered model choices shown during **Formal Leaf Model Selection**, preferring Pi scoped models when the user has configured them and otherwise falling back to the normal available model list.
+_Avoid_: Arbitrary hard-coded favorites, all unauthenticated models first
+
 **Global Tool Configuration**:
 The user-level **Tool Configuration File** that defines fallback behavior when no project-level default exists.
 _Avoid_: Machine-level hard ceiling
@@ -228,6 +280,26 @@ _Avoid_: MVP behavior, unconstrained agent
 - On runtime errors after execution starts, the tool returns a **Failed Run Result** with structured error information and partial run details when available.
 - Partial answers must not be presented as authoritative final answers.
 - **Context Budget Protection** is part of the reason RLMs exist in this product: the parent agent should pass references to large context, and Lambda-RLM should consume that context outside the **Parent Agent Context**.
+- Normal installed use owns a **Lambda-RLM User Workspace** at `~/.pi/lambda-rlm/`.
+- **Workspace Scaffolding** happens automatically when a **Pi Extension Instance** loads, so global installs feel prepared after the next Pi start or `/reload`.
+- **Workspace Scaffolding** may create missing workspace files automatically, but must be non-destructive, lightweight, and must not choose a billable model for the user.
+- The scaffolded `config.toml` uses a **Transparent Sparse Config Scaffold**: `thinking` and `pi_executable` may be active convenience defaults, the model line stays commented until user selection, and `[run]` defaults are documented as commented examples unless the user chooses to override them.
+- **Workspace Scaffolding** emits a **Scaffold Notification** only when it first creates the **Lambda-RLM User Workspace**.
+- **Copied Example Fixtures** are created only when missing and are never overwritten, because files in the **Lambda-RLM User Workspace** are user-editable onboarding artifacts.
+- The **Doctor Command** is the single user-facing setup/readiness/configuration command for the MVP.
+- The **Doctor Command** always runs diagnostics before offering configuration actions.
+- After diagnostics, the **Doctor Command** may offer a **Doctor Repair Flow** such as **Formal Leaf Model Selection**.
+- After a successful **Formal Leaf Model Selection** write, the **Doctor Command** reruns diagnostics because readiness changed.
+- After **Formal Leaf Thinking Selection**, rerunning diagnostics is optional because thinking is tuning rather than required readiness.
+- When interactive UI is unavailable, the **Doctor Command** uses **Diagnostic-Only Doctor Mode** and must not mutate configuration.
+- **Formal Leaf Model Selection** remains available from the **Doctor Command** even when diagnostics pass, so a user can change the leaf model without leaving their Pi flow.
+- **Formal Leaf Thinking Selection** may also be offered by the **Doctor Command**, but it is secondary tuning; the default remains `off` and readiness must not require changing it.
+- The **Configuration Write Target** defaults to **Global Tool Configuration** when no project configuration exists.
+- If **Project Tool Configuration** already exists, the **Doctor Repair Flow** asks whether to write the selected model globally or project-locally, because project config can override global config.
+- When existing **Project Tool Configuration** contributes the effective `[leaf].model`, the default highlighted **Configuration Write Target** is project-local; otherwise the default remains global while still offering project-local.
+- Writing **Formal Leaf Model Selection** uses a **Targeted Config Edit** whenever the target file is parseable or structurally salvageable.
+- A normalized rewrite of a **Tool Configuration File** is allowed only when targeted editing is not safe, such as invalid TOML, and only after explicit user confirmation.
+- The **Candidate Leaf Model Set** should prefer the user's scoped model configuration when present, then fall back to normal available models, with manual entry as an escape hatch.
 - The **Lambda-RLM Tool** decomposes one **Long-Context Reasoning Task** into zero or more **Model Calls**.
 - Each **Model Call** is answered by exactly one **Constrained Pi Leaf Call**.
 - Under the **Extension-Owned Leaf Runner**, the **Pi Extension Instance** starts each **Constrained Pi Leaf Call** and records its observability data.
@@ -239,6 +311,7 @@ _Avoid_: MVP behavior, unconstrained agent
 - The MVP starts with Lambda-RLM's existing prompt defaults and a minimal Formal Leaf Profile system prompt.
 - The full **Prompt Surface** is configurable/overrideable in MVP so future **Prompt Tuning Workflow** experiments can improve quality without redesigning the tool.
 - Prompt overrides use one Markdown file per prompt and file-by-file overlay from global and project **Prompt Overlay Directories** rather than requiring a complete prompt pack.
+- **Workspace Scaffolding** must not create prompt overlay files; **Prompt Overlay Directories** represent intentional operator ownership of prompt behavior.
 - Prompt overlays and templates use the **Prompt File Tree** convention.
 - Markdown prompt files use **Prompt Placeholder** syntax with strict **Prompt Placeholder Validation**.
 - The Pi extension owns prompt discovery, overlay resolution, source reporting, and validation.
@@ -298,7 +371,20 @@ _Avoid_: MVP behavior, unconstrained agent
 - Adapter seam was unresolved after prototypes — resolved: MVP may carry a local or forked Lambda-RLM patch for explicit `BaseLM` client injection; the project must not depend on upstream accepting a PR.
 - Prompt ownership was ambiguous — resolved: MVP reuses Lambda-RLM's existing prompt defaults where possible, and the full **Prompt Surface** is configurable/overrideable in MVP for future tuning workflows.
 - Prompt override granularity was ambiguous — resolved: global and project prompt files overlay built-in defaults file by file; missing files inherit from the next fallback layer.
-- Prompt default seeding was ambiguous — resolved: no init command and no automatic seeding; operators manually copy examples/templates into `prompts/` to take ownership of overrides.
+- Prompt default seeding was ambiguous — resolved: **Workspace Scaffolding** may create onboarding files and examples in the **Lambda-RLM User Workspace**, but it must not auto-seed prompt overlays; operators manually copy examples/templates into `prompts/` to take ownership of prompt overrides.
+- Setup command shape was ambiguous — resolved: keep `/lambda-rlm-doctor` as the single user-facing setup/readiness/config command rather than adding a separate one-time init command.
+- Leaf model selection ownership was ambiguous — resolved: **Formal Leaf Model Selection** is user-controlled through the **Doctor Command**; the system may suggest a **Candidate Leaf Model Set** but must not silently pick a billable default.
+- Candidate model ordering was ambiguous — resolved: prefer Pi scoped models when the user has configured them, then fall back to the normal available model list, with manual entry as an escape hatch.
+- Workspace scaffolding timing was ambiguous — resolved: perform lightweight, non-destructive **Workspace Scaffolding** when a **Pi Extension Instance** loads, not only after the user runs the **Doctor Command**.
+- Example ownership was ambiguous — resolved: copy example fixtures into `~/.pi/lambda-rlm/examples/` during **Workspace Scaffolding**, create missing files only, and never overwrite user edits.
+- Doctor config write target was ambiguous — resolved: default **Configuration Write Target** to global config unless project config already exists; if project config exists, ask whether to write global or project-local, highlighting project-local when the effective current model comes from project config.
+- Config mutation style was ambiguous — resolved: use **Targeted Config Edit** for normal model writes, preserving comments and ordering as much as possible; normalized rewrites require explicit confirmation when targeted editing is unsafe.
+- Scaffolded config completeness was ambiguous — resolved: use a **Transparent Sparse Config Scaffold** that documents run defaults as comments rather than active copied overrides, while leaving `[leaf].model` commented until user selection.
+- Leaf thinking setup was ambiguous — resolved: expose **Formal Leaf Thinking Selection** as a secondary **Doctor Command** action, not as required onboarding; default `off` remains the cost/control baseline.
+- Non-interactive doctor behavior was ambiguous — resolved: use **Diagnostic-Only Doctor Mode** when interactive UI is unavailable, reporting exact manual steps and never mutating config.
+- Scaffold notification behavior was ambiguous — resolved: show a one-time soft **Scaffold Notification** only when the **Lambda-RLM User Workspace** is first created, not on every reload.
+- Doctor action ordering was ambiguous — resolved: diagnostics always run before the **Doctor Command** offers repair or configuration actions.
+- Doctor rerun behavior was ambiguous — resolved: rerun diagnostics automatically after model changes; do not require rerun after thinking-only changes.
 - The name `RLM-SYSTEM-PROMPT.md` was ambiguous — resolved: use `FORMAL-LEAF-SYSTEM-PROMPT.md` for the MVP leaf system prompt file.
 - Run-control override ownership was ambiguous — resolved: **Global Tool Configuration** provides fallback defaults, **Project Tool Configuration** freely overrides those defaults inside the **Project Trust Boundary**, and the **Pi Agent** may only tighten values relative to the **Resolved Tool Configuration**.
 - Config completeness was ambiguous — resolved: global and project tool configuration files are TOML **Sparse Config Overlays**, not complete generated config copies.

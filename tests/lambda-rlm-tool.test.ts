@@ -25,6 +25,7 @@ async function executeLambdaRlmTool(
       : await mkdtemp(join(tmpdir(), "lambda-rlm-isolated-home-"));
   return executeLambdaRlmToolRaw(params, {
     ...(isolatedHome ? { homeDir: isolatedHome } : {}),
+    leafModel: "google/gemini-test",
     ...options,
   });
 }
@@ -811,6 +812,66 @@ sys.exit(0)
     });
     expect(JSON.stringify(result.details)).not.toContain("SECRET_LARGE_STDIN_SOURCE_");
     expect(text).not.toContain("SECRET_LARGE_STDIN_SOURCE_");
+  });
+
+  it("uses the configured Formal Leaf model from Lambda-RLM TOML config", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "lambda-rlm-leaf-config-"));
+    const configPath = join(cwd, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(join(cwd, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(configPath, '[leaf]\nmodel = "local-vllm/qwen"\n', "utf-8");
+    const contextPath = join(cwd, "context.txt");
+    await writeFile(contextPath, "short source", "utf-8");
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import json, sys
+request = json.loads(sys.stdin.readline())
+run_id = request["runId"]
+print(json.dumps({"type":"model_callback_request","runId":run_id,"requestId":"model-call-1","prompt":"leaf prompt","metadata":{"phase":"test"}}), flush=True)
+response = json.loads(sys.stdin.readline())
+print(json.dumps({"type":"run_result","runId":run_id,"ok":True,"content":response["content"],"modelCalls":1,"metadata":{}}), flush=True)
+`);
+    const invocations: string[][] = [];
+
+    const result = await executeLambdaRlmToolRaw(
+      { contextPath: "context.txt", question: "Which model?" },
+      {
+        bridgePath,
+        cwd,
+        homeDir: await mkdtemp(join(tmpdir(), "lambda-rlm-isolated-home-")),
+        leafProcessRunner: (invocation) => {
+          invocations.push(invocation.args);
+          return { exitCode: 0, stderr: "", stdout: "configured leaf answer\n" };
+        },
+      },
+    );
+
+    expect(result.details.ok).toBeTruthy();
+    expect(firstContentText(result)).toContain("configured leaf answer");
+    expect(invocations[0]).toStrictEqual(expect.arrayContaining(["--model", "local-vllm/qwen"]));
+  });
+
+  it("fails before the bridge when no Formal Leaf model is configured", async () => {
+    const contextPath = await tempContextFile("short source");
+    let bridgeStarted = false;
+
+    const result = await executeLambdaRlmToolRaw(
+      { contextPath, question: "What?" },
+      {
+        homeDir: await mkdtemp(join(tmpdir(), "lambda-rlm-isolated-home-")),
+        leafProcessRunner: () => {
+          bridgeStarted = true;
+          return { exitCode: 0, stderr: "", stdout: "" };
+        },
+      },
+    );
+
+    expect(bridgeStarted).toBeFalsy();
+    expect(result.details).toMatchObject({
+      error: { code: "missing_leaf_model", field: "leaf.model", type: "validation" },
+      execution: { executionStarted: false, partialDetailsAvailable: false },
+      ok: false,
+      runStatus: "validation_failed",
+    });
+    expect(firstContentText(result)).toContain("[leaf].model");
   });
 
   it("enforces resolved max input bytes from TOML config before starting the real bridge path", async () => {

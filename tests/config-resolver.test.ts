@@ -2,7 +2,12 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_RUN_CONFIG, resolveRunConfig } from "../src/config-resolver.js";
+import {
+  DEFAULT_LEAF_CONFIG,
+  DEFAULT_RUN_CONFIG,
+  resolveLambdaRlmConfig,
+  resolveRunConfig,
+} from "../src/config-resolver.js";
 
 async function tempConfigDirs() {
   const root = await mkdtemp(join(tmpdir(), "lambda-rlm-config-"));
@@ -34,17 +39,44 @@ describe("TOML run config resolver", () => {
       config: DEFAULT_RUN_CONFIG,
       ok: true,
     });
+    await expect(
+      resolveLambdaRlmConfig({ cwd: dirs.project, homeDir: dirs.home }),
+    ).resolves.toStrictEqual({
+      config: { leaf: DEFAULT_LEAF_CONFIG, run: DEFAULT_RUN_CONFIG },
+      ok: true,
+    });
   });
 
   it("applies sparse global and project overlays with project-over-global precedence", async () => {
     const dirs = await tempConfigDirs();
     await writeToml(
       dirs.globalConfigPath,
-      "[run]\nmax_input_bytes = 1000\noutput_max_bytes = 200\nmax_model_calls = 8\nwhole_run_timeout_ms = 5000\nmodel_process_concurrency = 3\n",
+      [
+        "[run]",
+        "max_input_bytes = 1000",
+        "output_max_bytes = 200",
+        "max_model_calls = 8",
+        "whole_run_timeout_ms = 5000",
+        "model_process_concurrency = 3",
+        "",
+        "[leaf]",
+        'model = "google/gemini-3-flash-preview"',
+        'thinking = "off"',
+      ].join("\n"),
     );
     await writeToml(
       dirs.projectConfigPath,
-      "[run]\noutput_max_lines = 5\noutput_max_bytes = 120\nmodel_call_timeout_ms = 900\nmodel_process_concurrency = 1\n",
+      [
+        "[run]",
+        "output_max_lines = 5",
+        "output_max_bytes = 120",
+        "model_call_timeout_ms = 900",
+        "model_process_concurrency = 1",
+        "",
+        "[leaf]",
+        'model = "local-vllm/qwen"',
+        'pi_executable = "pi-dev"',
+      ].join("\n"),
     );
 
     await expect(
@@ -58,6 +90,23 @@ describe("TOML run config resolver", () => {
         outputMaxBytes: 120,
         outputMaxLines: 5,
         wholeRunTimeoutMs: 5000,
+      },
+      ok: true,
+    });
+    await expect(
+      resolveLambdaRlmConfig({ cwd: dirs.project, homeDir: dirs.home }),
+    ).resolves.toStrictEqual({
+      config: {
+        leaf: { model: "local-vllm/qwen", piExecutable: "pi-dev", thinking: "off" },
+        run: {
+          maxInputBytes: 1000,
+          maxModelCalls: 8,
+          modelCallTimeoutMs: 900,
+          modelProcessConcurrency: 1,
+          outputMaxBytes: 120,
+          outputMaxLines: 5,
+          wholeRunTimeoutMs: 5000,
+        },
       },
       ok: true,
     });
@@ -125,6 +174,9 @@ describe("TOML run config resolver", () => {
     ["invalid_toml", "not toml", "invalid_toml"],
     ["unknown_key", "[run]\nmax_input_bytes = 100\nextra = 1\n", "unknown_config_key"],
     ["invalid_value", "[run]\nmax_input_bytes = 0\n", "invalid_config_value"],
+    ["unknown_leaf_key", '[leaf]\nextra = "x"\n', "unknown_config_key"],
+    ["invalid_leaf_model", '[leaf]\nmodel = ""\n', "invalid_config_value"],
+    ["invalid_leaf_thinking", '[leaf]\nthinking = "maximum"\n', "invalid_config_value"],
     ["unknown_table", "[prompt]\nfoo = 1\n", "unknown_config_key"],
     ["duplicate_key", "[run]\nmax_input_bytes = 100\nmax_input_bytes = 90\n", "invalid_toml"],
     [

@@ -13,6 +13,15 @@ function readPromptFromInvocation(invocation: { args: string[] }) {
   return promptFile?.startsWith("@") ? readFile(promptFile.slice(1), "utf-8") : "";
 }
 
+async function writeLeafConfig(cwd: string) {
+  await mkdir(join(cwd, ".pi", "lambda-rlm"), { recursive: true });
+  await writeFile(
+    join(cwd, ".pi", "lambda-rlm", "config.toml"),
+    '[leaf]\nmodel = "google/gemini-test"\n',
+    "utf-8",
+  );
+}
+
 async function executeLambdaRlmTool(
   params: unknown,
   options: Parameters<typeof executeLambdaRlmToolRaw>[1] = {},
@@ -30,6 +39,7 @@ async function executeLambdaRlmTool(
 describe("final MVP mock end-to-end scenarios", () => {
   it("covers the primary long-context file QA scenario through the real bridge and fake Formal Leaf runner", async () => {
     const cwd = await tempDir("lambda-rlm-final-qa-");
+    await writeLeafConfig(cwd);
     const contextPath = join(cwd, "architecture-notes.md");
     await writeFile(
       contextPath,
@@ -103,6 +113,7 @@ describe("final MVP mock end-to-end scenarios", () => {
 
   it("covers the secondary long-context synthesis scenario across multiple files with bounded, clear output", async () => {
     const cwd = await tempDir("lambda-rlm-final-synthesis-");
+    await writeLeafConfig(cwd);
     await mkdir(join(cwd, "notes"), { recursive: true });
     await writeFile(
       join(cwd, "notes", "one.md"),

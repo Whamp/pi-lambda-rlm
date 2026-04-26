@@ -6,7 +6,7 @@ import {
 } from "./leaf-runner.js";
 import type { Awaitable, ProcessRunner } from "./leaf-runner.js";
 import { resolvePromptBundle } from "./prompt-resolver.js";
-import { resolveRunConfig } from "./config-resolver.js";
+import { resolveLambdaRlmConfig } from "./config-resolver.js";
 import { runSyntheticBridge } from "./bridge-runner.js";
 
 export type DoctorStatus = "ok" | "warn" | "error";
@@ -28,12 +28,19 @@ type MockBridgeResult =
   | { ok: true; message: string; details?: Record<string, unknown> }
   | { ok: false; message: string; details?: Record<string, unknown> };
 
+interface MinimalModelRegistry {
+  find?: (provider: string, modelId: string) => unknown;
+  hasConfiguredAuth?: (model: unknown) => boolean;
+}
+
 export interface DoctorOptions {
   cwd?: string;
   homeDir?: string;
   pythonPath?: string;
   piExecutable?: string;
   processRunner?: ProcessRunner;
+  env?: NodeJS.ProcessEnv;
+  modelRegistry?: MinimalModelRegistry;
   globalConfigPath?: string;
   projectConfigPath?: string;
   builtInPromptDir?: string;
@@ -236,13 +243,17 @@ async function lambdaRlmDependencyChecks(processRunner: ProcessRunner, pythonPat
   return [dependencyCheck, seamCheck];
 }
 
-async function configCheck(options: DoctorOptions, cwd: string) {
-  const configResult = await resolveRunConfig({
+function resolvedConfigForDoctor(options: DoctorOptions, cwd: string) {
+  return resolveLambdaRlmConfig({
     cwd,
     ...(options.homeDir ? { homeDir: options.homeDir } : {}),
     ...(options.globalConfigPath ? { globalConfigPath: options.globalConfigPath } : {}),
     ...(options.projectConfigPath ? { projectConfigPath: options.projectConfigPath } : {}),
   });
+}
+
+async function configCheck(options: DoctorOptions, cwd: string) {
+  const configResult = await resolvedConfigForDoctor(options, cwd);
   if (configResult.ok) {
     return check("config", "ok", "Resolved TOML configuration is valid.", {
       config: configResult.config,
@@ -253,7 +264,99 @@ async function configCheck(options: DoctorOptions, cwd: string) {
     "error",
     configResult.error.message,
     { code: configResult.error.code, field: configResult.error.field },
-    "Fix ~/.pi/lambda-rlm/config.toml or <project>/.pi/lambda-rlm/config.toml; use positive integer [run] keys only.",
+    "Fix ~/.pi/lambda-rlm/config.toml or <project>/.pi/lambda-rlm/config.toml; use [leaf] string keys and positive integer [run] keys only.",
+  );
+}
+
+function envLeafModel(options: DoctorOptions) {
+  const value = (options.env ?? process.env).LAMBDA_RLM_LEAF_MODEL?.trim();
+  return value && value.length > 0 ? value : undefined;
+}
+
+function splitProviderModel(modelPattern: string) {
+  const slash = modelPattern.indexOf("/");
+  if (slash <= 0 || slash === modelPattern.length - 1) {
+    return;
+  }
+  return { modelId: modelPattern.slice(slash + 1), provider: modelPattern.slice(0, slash) };
+}
+
+function registryModelCheck(modelPattern: string, modelRegistry: MinimalModelRegistry | undefined) {
+  if (!modelRegistry?.find || !modelRegistry.hasConfiguredAuth) {
+    return;
+  }
+  const parsed = splitProviderModel(modelPattern);
+  if (!parsed) {
+    return check(
+      "leaf_model",
+      "warn",
+      `Formal Leaf model is configured as ${modelPattern}, but doctor can only verify exact <provider>/<model-id> patterns against Pi's model registry.`,
+      { leafModel: modelPattern, source: "config" },
+      "Prefer an exact provider/model-id accepted by `pi --model`, then rerun /lambda-rlm-doctor.",
+    );
+  }
+  const findModel = modelRegistry.find.bind(modelRegistry);
+  const model = findModel(parsed.provider, parsed.modelId);
+  if (!model) {
+    return check(
+      "leaf_model",
+      "error",
+      `Configured Formal Leaf model ${modelPattern} was not found in Pi's model registry.`,
+      { leafModel: modelPattern, provider: parsed.provider, modelId: parsed.modelId },
+      "Pick a model shown by `/model` or `pi --list-models`, or add the provider/model to ~/.pi/agent/models.json.",
+    );
+  }
+  if (!modelRegistry.hasConfiguredAuth(model)) {
+    return check(
+      "leaf_model",
+      "error",
+      `Configured Formal Leaf model ${modelPattern} exists, but Pi does not have credentials for it.`,
+      { leafModel: modelPattern, provider: parsed.provider, modelId: parsed.modelId },
+      "Run `/login`, set the provider API key, or update ~/.pi/agent/auth.json before using lambda_rlm.",
+    );
+  }
+}
+
+async function leafModelCheck(options: DoctorOptions, cwd: string) {
+  const configResult = await resolvedConfigForDoctor(options, cwd);
+  if (!configResult.ok) {
+    return check(
+      "leaf_model",
+      "error",
+      "Formal Leaf model could not be checked because TOML configuration is invalid.",
+      { code: configResult.error.code, field: configResult.error.field },
+      "Fix ~/.pi/lambda-rlm/config.toml or <project>/.pi/lambda-rlm/config.toml, then rerun /lambda-rlm-doctor.",
+    );
+  }
+  const configuredModel = configResult.config.leaf.model;
+  if (configuredModel) {
+    const registryCheck = registryModelCheck(configuredModel, options.modelRegistry);
+    if (registryCheck) {
+      return registryCheck;
+    }
+    return check("leaf_model", "ok", `Formal Leaf model is configured: ${configuredModel}.`, {
+      leafModel: configuredModel,
+      source: "config",
+    });
+  }
+
+  const envModel = envLeafModel(options);
+  if (envModel) {
+    return check(
+      "leaf_model",
+      "error",
+      `Formal Leaf model is only set through LAMBDA_RLM_LEAF_MODEL=${envModel}; installed use requires [leaf].model in config.toml.`,
+      { leafModel: envModel, source: "env" },
+      'Add [leaf] model = "<provider>/<model-id>" to ~/.pi/lambda-rlm/config.toml for stable global setup.',
+    );
+  }
+
+  return check(
+    "leaf_model",
+    "error",
+    "No Formal Leaf model is configured. Missing required [leaf].model for real Lambda-RLM runs.",
+    { source: "missing" },
+    'Create ~/.pi/lambda-rlm/config.toml with [leaf]\nmodel = "<provider>/<model-id>" using a model accepted by `pi --model`.',
   );
 }
 
@@ -277,6 +380,14 @@ async function promptsCheck(options: DoctorOptions, cwd: string) {
     { code: promptResult.error.code, field: promptResult.error.field },
     "Fix the prompt overlay Markdown file or remove the invalid overlay; doctor will not auto-seed or mutate prompt overlays.",
   );
+}
+
+async function piExecutableForDoctor(options: DoctorOptions, cwd: string) {
+  if (options.piExecutable) {
+    return options.piExecutable;
+  }
+  const configResult = await resolvedConfigForDoctor(options, cwd);
+  return configResult.ok ? configResult.config.leaf.piExecutable : "pi";
 }
 
 async function piExecutableCheck(processRunner: ProcessRunner, piExecutable: string) {
@@ -346,13 +457,14 @@ async function mockBridgeCheck(
 export async function runLambdaRlmDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
   const cwd = options.cwd ?? process.cwd();
   const pythonPath = options.pythonPath ?? "python3";
-  const piExecutable = options.piExecutable ?? "pi";
+  const piExecutable = await piExecutableForDoctor(options, cwd);
   const bridgePath = options.bridgePath ?? defaultBridgePath();
   const processRunner = options.processRunner ?? nodeProcessRunner;
   const checks = [
     await pythonVersionCheck(processRunner, pythonPath),
     ...(await lambdaRlmDependencyChecks(processRunner, pythonPath)),
     await configCheck(options, cwd),
+    await leafModelCheck(options, cwd),
     await promptsCheck(options, cwd),
     await piExecutableCheck(processRunner, piExecutable),
     formalLeafCommandCheck(piExecutable),

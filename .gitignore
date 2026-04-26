@@ -24,7 +24,7 @@ venv/
 .worktrees/
 .env
 .env.*
-!.env.example
+.pi/lambda-rlm/config.toml
 
 # Logs
 *.log

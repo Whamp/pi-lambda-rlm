@@ -79,6 +79,10 @@ interface ToolUpdate {
 interface MinimalCommandContext {
   cwd?: string;
   leafProcessRunner?: ProcessRunner;
+  modelRegistry?: {
+    find?: (provider: string, modelId: string) => unknown;
+    hasConfiguredAuth?: (model: unknown) => boolean;
+  };
   ui?: { notify?: (message: string) => void | Promise<void> };
 }
 interface MinimalPiApi {
@@ -118,6 +122,7 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
       const report = await runLambdaRlmDoctor({
         cwd: ctx.cwd ?? process.cwd(),
         ...(ctx.leafProcessRunner ? { processRunner: ctx.leafProcessRunner } : {}),
+        ...(ctx.modelRegistry ? { modelRegistry: ctx.modelRegistry } : {}),
       });
       const summary = `lambda_rlm doctor ${report.ok ? "passed" : "found errors"}: ${report.checks.filter((entry) => entry.status === "error").length} error(s), ${report.checks.filter((entry) => entry.status === "warn").length} warning(s).`;
       await ctx.ui?.notify?.(summary);

@@ -1,20 +1,20 @@
 # Smoke Tests
 
-Real smoke tests are gated because they require local Pi CLI authentication and model access.
+Real smoke tests are explicit because they require local Pi CLI authentication and model access.
 
-Default verification:
+Configure the same TOML path used by installed users:
 
-```bash
-npm run test:pi-leaf-smoke
+```toml
+# ~/.pi/lambda-rlm/config.toml
+[leaf]
+model = "<provider>/<model-id>"
 ```
 
-This skips the real tests unless explicitly enabled.
+For a repo-local smoke-test override, create `.pi/lambda-rlm/config.toml` with the same shape. This file is ignored in this repository so machine-specific model choices do not get committed.
 
-Enabled verification:
+Run:
 
 ```bash
-PI_LAMBDA_RLM_LEAF_SMOKE=1 \
-LAMBDA_RLM_LEAF_MODEL=google/gemini-3-flash-preview \
 npm run test:pi-leaf-smoke
 ```
 

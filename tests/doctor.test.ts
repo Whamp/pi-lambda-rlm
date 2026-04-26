@@ -9,6 +9,13 @@ function tempDir() {
   return mkdtemp(join(tmpdir(), "lambda-rlm-doctor-test-"));
 }
 
+async function writeLeafConfig(root: string, model = "google/gemini-3-flash-preview") {
+  const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+  await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+  await writeFile(projectConfigPath, `[leaf]\nmodel = "${model}"\n`, "utf-8");
+  return projectConfigPath;
+}
+
 const okRunner: ProcessRunner = (invocation) => {
   if (invocation.command === "python3") {
     if (invocation.args.includes("--version")) {
@@ -124,9 +131,14 @@ describe("lambda_rlm doctor diagnostics", () => {
   });
 
   it("reports missing Python/dependency and missing Pi executable through injected process hooks", async () => {
+    const root = await tempDir();
+    const projectConfigPath = await writeLeafConfig(root);
+
     const report = await runLambdaRlmDoctor({
+      cwd: root,
       mockBridgeRunner: () => ({ ok: true, message: "mock bridge ok" }),
       processRunner: missingDependencyRunner,
+      projectConfigPath,
     });
 
     expect(report.ok).toBeFalsy();
@@ -170,14 +182,111 @@ describe("lambda_rlm doctor diagnostics", () => {
     );
   });
 
-  it("reports mock bridge/tool success without real model credentials and verifies Formal Leaf command shape", async () => {
+  it("reports an actionable error when no Formal Leaf model is configured", async () => {
+    const root = await tempDir();
+
     const report = await runLambdaRlmDoctor({
+      cwd: root,
+      env: {},
+      homeDir: join(root, "home"),
+      mockBridgeRunner: () => ({ ok: true, message: "mock bridge ok" }),
+      processRunner: okRunner,
+    });
+
+    expect(report.ok).toBeFalsy();
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({
+        message: expect.stringContaining("[leaf].model"),
+        name: "leaf_model",
+        remediation: expect.stringContaining("~/.pi/lambda-rlm/config.toml"),
+        status: "error",
+      }),
+    );
+  });
+
+  it("uses the configured leaf pi_executable for Pi availability and command-shape checks", async () => {
+    const root = await tempDir();
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(
+      projectConfigPath,
+      '[leaf]\nmodel = "google/gemini-3-flash-preview"\npi_executable = "pi-dev"\n',
+      "utf-8",
+    );
+    const seenCommands: string[] = [];
+    const processRunner: ProcessRunner = (invocation) => {
+      seenCommands.push(invocation.command);
+      if (invocation.command === "python3") {
+        return okRunner(invocation);
+      }
+      if (invocation.command === "pi-dev") {
+        return { exitCode: 0, stdout: "pi-dev 0.0.0\n", stderr: "" };
+      }
+      return { exitCode: 127, stdout: "", stderr: `${invocation.command}: command not found` };
+    };
+
+    const report = await runLambdaRlmDoctor({
+      cwd: root,
+      mockBridgeRunner: () => ({ ok: true, message: "mock bridge completed" }),
+      processRunner,
+      projectConfigPath,
+    });
+
+    expect(report.ok).toBeTruthy();
+    expect(seenCommands).toContain("pi-dev");
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({
+        details: expect.objectContaining({ piExecutable: "pi-dev" }),
+        name: "pi_executable",
+        status: "ok",
+      }),
+    );
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          command: expect.objectContaining({ command: "pi-dev" }),
+        }),
+        name: "formal_leaf_command",
+        status: "ok",
+      }),
+    );
+  });
+
+  it("treats an env-only leaf model as not installed-use ready", async () => {
+    const root = await tempDir();
+
+    const report = await runLambdaRlmDoctor({
+      cwd: root,
+      env: { LAMBDA_RLM_LEAF_MODEL: "google/gemini-3-flash-preview" },
+      homeDir: join(root, "home"),
+      mockBridgeRunner: () => ({ ok: true, message: "mock bridge completed" }),
+      processRunner: okRunner,
+    });
+
+    expect(report.ok).toBeFalsy();
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({
+        message: expect.stringContaining("LAMBDA_RLM_LEAF_MODEL"),
+        name: "leaf_model",
+        remediation: expect.stringContaining("config.toml"),
+        status: "error",
+      }),
+    );
+  });
+
+  it("reports mock bridge/tool success without real model credentials and verifies Formal Leaf command shape", async () => {
+    const root = await tempDir();
+    const projectConfigPath = await writeLeafConfig(root);
+
+    const report = await runLambdaRlmDoctor({
+      cwd: root,
       mockBridgeRunner: () => ({
         details: { modelCalls: 2 },
         message: "mock bridge completed",
         ok: true,
       }),
       processRunner: okRunner,
+      projectConfigPath,
     });
 
     expect(report.ok).toBeTruthy();
