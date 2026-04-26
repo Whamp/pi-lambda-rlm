@@ -23,6 +23,8 @@ describe("operator docs and examples", () => {
     expect(readme).toContain("~/.pi/agent/auth.json");
     expect(readme).toContain("/login");
     expect(readme).toContain("/lambda-rlm-doctor");
+    expect(readme).toContain("Formal Leaf Model Selection");
+    expect(readme).toContain("Manual editing remains the fallback");
     expect(readme).toContain("contextPath");
     expect(readme).toContain("contextPaths");
     expect(readme).toContain("question");

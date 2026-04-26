@@ -1,6 +1,9 @@
+import { dirname, join } from "node:path";
 import { Type } from "typebox";
 import { executeLambdaRlmTool, LambdaRlmValidationError } from "./lambda-rlm-tool.js";
 import { buildDoctorActionMenu, renderDoctorCommandOutput, runLambdaRlmDoctor } from "./doctor.js";
+import type { DoctorOptions } from "./doctor.js";
+import { writeFormalLeafModelSelection } from "./targeted-config-edit.js";
 import { ensureLambdaRlmUserWorkspace } from "./workspace-scaffolding.js";
 import type { ProcessRunner } from "./leaf-runner.js";
 import type { ModelCallConcurrencyQueue } from "./model-call-queue.js";
@@ -84,7 +87,15 @@ interface MinimalCommandContext {
     find?: (provider: string, modelId: string) => unknown;
     hasConfiguredAuth?: (model: unknown) => boolean;
   };
-  ui?: { notify?: (message: string) => void | Promise<void> };
+  ui?: {
+    notify?: (message: string) => void | Promise<void>;
+    promptText?: (prompt: string) => string | Promise<string>;
+    select?: (
+      prompt: string,
+      choices: { id: string; label: string; description?: string; recommended?: boolean }[],
+      defaultChoiceId?: string,
+    ) => string | Promise<string>;
+  };
 }
 interface MinimalPiApi {
   lambdaRlmWorkspacePath?: string;
@@ -114,6 +125,80 @@ function commandContextFromArgs(args: unknown[]): MinimalCommandContext {
   return {};
 }
 
+function globalConfigPathForWorkspace(workspacePath: string | undefined) {
+  return workspacePath ? join(workspacePath, "config.toml") : undefined;
+}
+
+function defaultGlobalConfigPath() {
+  return join(process.env.HOME ?? ".", ".pi", "lambda-rlm", "config.toml");
+}
+
+async function maybeRunInteractiveModelSelection(args: {
+  ctx: MinimalCommandContext;
+  doctorOptions: DoctorOptions;
+  initialText: string;
+  menu: ReturnType<typeof buildDoctorActionMenu> | undefined;
+  piWorkspacePath?: string;
+  report: Awaited<ReturnType<typeof runLambdaRlmDoctor>>;
+}) {
+  if (!args.menu || !args.ctx.ui?.select || !args.ctx.ui.promptText) {
+    return;
+  }
+  const selectedAction = await args.ctx.ui.select(
+    "Choose a Lambda-RLM Doctor Repair Flow action after diagnostics.",
+    args.menu.actions,
+    args.menu.defaultActionId,
+  );
+  if (selectedAction !== "select_formal_leaf_model") {
+    return;
+  }
+  const initialConfigError = args.report.checks.find(
+    (check) => check.name === "config" && check.status === "error",
+  );
+  if (initialConfigError) {
+    const combinedText = `${args.initialText}\n\nFormal Leaf Model Selection was not started because initial diagnostics reported invalid Lambda-RLM configuration. Fix the TOML/config error first, then rerun /lambda-rlm-doctor.`;
+    await args.ctx.ui.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+    return {
+      content: [{ text: combinedText, type: "text" }],
+      details: {
+        ...args.report,
+        actions: args.menu,
+        blockedAction: {
+          id: "select_formal_leaf_model",
+          reason: "initial_config_error",
+        },
+      },
+    };
+  }
+  const model = await args.ctx.ui.promptText(
+    "Enter a manual Formal Leaf model pattern for Formal Leaf Model Selection (for example provider/model-id).",
+  );
+  if (!model.trim()) {
+    return;
+  }
+
+  const writeTarget =
+    globalConfigPathForWorkspace(args.piWorkspacePath) ?? defaultGlobalConfigPath();
+  const modelWrite = await writeFormalLeafModelSelection({ configPath: writeTarget, model });
+  const rerun = await runLambdaRlmDoctor({
+    ...args.doctorOptions,
+    globalConfigPath: writeTarget,
+    workspacePath: args.piWorkspacePath ?? dirname(writeTarget),
+  });
+  const rerunText = renderDoctorCommandOutput(rerun, { interactive: true });
+  const combinedText = `${args.initialText}\n\nFormal Leaf Model Selection wrote ${modelWrite.model} to Global Tool Configuration (${modelWrite.configPath}) using a Targeted Config Edit (${modelWrite.kind}).\n\nDiagnostics after Formal Leaf Model Selection write:\n${rerunText}`;
+  await args.ctx.ui.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  return {
+    content: [{ text: combinedText, type: "text" }],
+    details: {
+      ...args.report,
+      actions: args.menu,
+      modelWrite: { ...modelWrite, target: "global" },
+      rerun,
+    },
+  };
+}
+
 export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
   const modelCallQueueState: { current?: ModelCallConcurrencyQueue } = {};
   if (process.env.NODE_ENV !== "test" || pi.lambdaRlmWorkspacePath) {
@@ -132,22 +217,38 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
       "Runs non-destructive, workspace-ensuring Lambda-RLM MVP setup diagnostics for Python, config, prompts, fork seams, Pi leaf command shape, and mock bridge readiness.",
     async handler(...args: unknown[]) {
       const ctx = commandContextFromArgs(args);
-      const report = await runLambdaRlmDoctor({
-        cwd: ctx.cwd ?? process.cwd(),
+      const cwd = ctx.cwd ?? process.cwd();
+      const globalConfigPath = globalConfigPathForWorkspace(pi.lambdaRlmWorkspacePath);
+      const doctorOptions = {
+        cwd,
         ...(ctx.leafProcessRunner ? { processRunner: ctx.leafProcessRunner } : {}),
         ...(ctx.modelRegistry ? { modelRegistry: ctx.modelRegistry } : {}),
         ...(pi.lambdaRlmWorkspacePath ? { workspacePath: pi.lambdaRlmWorkspacePath } : {}),
-      });
+        ...(globalConfigPath ? { globalConfigPath } : {}),
+      };
+      const report = await runLambdaRlmDoctor(doctorOptions);
       const interactive = Boolean(ctx.ui);
       const text = renderDoctorCommandOutput(report, { interactive });
+      const menu = interactive ? buildDoctorActionMenu(report) : undefined;
+
+      const modelSelectionResult = await maybeRunInteractiveModelSelection({
+        ctx,
+        doctorOptions,
+        initialText: text,
+        menu,
+        ...(pi.lambdaRlmWorkspacePath ? { piWorkspacePath: pi.lambdaRlmWorkspacePath } : {}),
+        report,
+      });
+      if (modelSelectionResult) {
+        return modelSelectionResult;
+      }
+
       await ctx.ui?.notify?.(text.split("\n", 1)[0] ?? text);
       return {
         content: [{ text, type: "text" }],
         details: {
           ...report,
-          ...(interactive
-            ? { actions: buildDoctorActionMenu(report) }
-            : { mode: "diagnostic-only" }),
+          ...(interactive ? { actions: menu } : { mode: "diagnostic-only" }),
         },
       };
     },
