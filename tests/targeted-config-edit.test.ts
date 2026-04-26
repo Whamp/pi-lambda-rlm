@@ -1,8 +1,11 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { writeFormalLeafModelSelection } from "../src/targeted-config-edit.js";
+import {
+  normalizeRewriteInvalidConfig,
+  writeFormalLeafModelSelection,
+} from "../src/targeted-config-edit.js";
 
 async function tempConfig(content?: string) {
   const root = await mkdtemp(join(tmpdir(), "lambda-rlm-targeted-edit-"));
@@ -94,5 +97,39 @@ describe("Targeted Config Edit for Formal Leaf Model Selection", () => {
 
     await expect(readFile(configPath, "utf-8")).resolves.toBe(`[leaf]\nmodel = "google/gemini"\n`);
     expect(result.kind).toBe("added_leaf_table");
+  });
+
+  it("blocks Targeted Config Edit for Formal Leaf Model Selection when TOML is structurally unsafe", async () => {
+    const configPath = await tempConfig(`[leaf]\nmodel = `);
+
+    await expect(
+      writeFormalLeafModelSelection({ configPath, model: "local/qwen" }),
+    ).rejects.toMatchObject({ code: "unsafe_config_edit" });
+    await expect(readFile(configPath, "utf-8")).resolves.toBe(`[leaf]\nmodel = `);
+  });
+
+  it("requires explicit confirmation before normalized rewrite and preserves invalid config without it", async () => {
+    const configPath = await tempConfig(`[leaf]\nmodel = `);
+
+    const result = await normalizeRewriteInvalidConfig({ configPath, confirmed: false });
+
+    expect(result.rewritten).toBeFalsy();
+    await expect(readFile(configPath, "utf-8")).resolves.toBe(`[leaf]\nmodel = `);
+  });
+
+  it("creates a backup before confirmed normalized rewrite of invalid config", async () => {
+    const configPath = await tempConfig(`[leaf]\nmodel = `);
+
+    const result = await normalizeRewriteInvalidConfig({ configPath, confirmed: true });
+
+    if (!result.rewritten) {
+      throw new Error("expected confirmed normalized rewrite to occur");
+    }
+    expect(result.backupPath).toContain("config.toml.invalid.");
+    await expect(readFile(result.backupPath, "utf-8")).resolves.toBe(`[leaf]\nmodel = `);
+    await expect(stat(result.backupPath)).resolves.toBeTruthy();
+    await expect(readFile(configPath, "utf-8")).resolves.toContain(
+      '# model = "<provider>/<model-id>"',
+    );
   });
 });

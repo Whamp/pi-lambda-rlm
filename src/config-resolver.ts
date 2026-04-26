@@ -33,6 +33,8 @@ export interface ConfigValidationError {
   code: string;
   message: string;
   field: string;
+  path?: string;
+  source?: "global" | "project";
 }
 
 export type ConfigResult<T = RunConfig> =
@@ -112,6 +114,14 @@ const LEAF_THINKING_VALUES = new Set<LeafThinking>([
 
 function validationError(code: string, message: string, field: string): ConfigValidationError {
   return { code, field, message, type: "validation" };
+}
+
+function configFileValidationError(
+  error: ConfigValidationError,
+  source: "global" | "project",
+  path: string,
+): ConfigValidationError {
+  return { ...error, path, source };
 }
 
 async function readOptional(path: string): Promise<string | undefined> {
@@ -425,7 +435,7 @@ export async function resolveLambdaRlmConfigWithSources(
     exists[source] = true;
     const parsed = parseConfigToml(text, source);
     if (!parsed.ok) {
-      return parsed;
+      return { error: configFileValidationError(parsed.error, source, path), ok: false };
     }
     if (parsed.overlay.leaf.model) {
       sources.leaf.model = source;
