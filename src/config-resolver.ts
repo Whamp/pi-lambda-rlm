@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 export interface RunConfig {
   maxInputBytes: number;
@@ -410,10 +410,14 @@ export async function resolveLambdaRlmConfigWithSources(
   };
 
   let config: LambdaRlmConfig = { leaf: DEFAULT_LEAF_CONFIG, run: DEFAULT_RUN_CONFIG };
-  for (const [source, path] of [
+  const configLayers = [
     ["global", globalConfigPath],
-    ["project", projectConfigPath],
-  ] as const) {
+    ...(resolve(projectConfigPath) === resolve(globalConfigPath)
+      ? []
+      : [["project", projectConfigPath] as const]),
+  ] as const;
+
+  for (const [source, path] of configLayers) {
     const text = await readOptional(path);
     if (text === undefined) {
       continue;

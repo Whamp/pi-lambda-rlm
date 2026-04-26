@@ -6,6 +6,7 @@ import {
   DEFAULT_LEAF_CONFIG,
   DEFAULT_RUN_CONFIG,
   resolveLambdaRlmConfig,
+  resolveLambdaRlmConfigWithSources,
   resolveRunConfig,
 } from "../src/config-resolver.js";
 
@@ -43,6 +44,29 @@ describe("TOML run config resolver", () => {
       resolveLambdaRlmConfig({ cwd: dirs.project, homeDir: dirs.home }),
     ).resolves.toStrictEqual({
       config: { leaf: DEFAULT_LEAF_CONFIG, run: DEFAULT_RUN_CONFIG },
+      ok: true,
+    });
+  });
+
+  it("reports home-directory config as global only when global and project paths are identical", async () => {
+    const dirs = await tempConfigDirs();
+    const homeProjectConfigPath = join(dirs.home, ".pi", "lambda-rlm", "config.toml");
+    await writeToml(homeProjectConfigPath, '[leaf]\nmodel = "global/model"\n');
+
+    await expect(
+      resolveLambdaRlmConfigWithSources({ cwd: dirs.home, homeDir: dirs.home }),
+    ).resolves.toStrictEqual({
+      config: {
+        config: {
+          leaf: { ...DEFAULT_LEAF_CONFIG, model: "global/model" },
+          run: DEFAULT_RUN_CONFIG,
+        },
+        sources: {
+          exists: { global: true, project: false },
+          leaf: { model: "global" },
+          paths: { global: homeProjectConfigPath, project: homeProjectConfigPath },
+        },
+      },
       ok: true,
     });
   });
