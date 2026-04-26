@@ -99,6 +99,27 @@ describe("lambda_rlm doctor diagnostics", () => {
     );
   });
 
+  it("uses homeDir to derive the doctor scaffold workspace when workspacePath is not provided", async () => {
+    const root = await tempDir();
+    const homeDir = join(root, "home");
+    const expectedWorkspacePath = join(homeDir, ".pi", "lambda-rlm");
+
+    await runLambdaRlmDoctor({
+      cwd: root,
+      env: {},
+      homeDir,
+      mockBridgeRunner: () => ({ details: {}, message: "mock ok", ok: true }),
+      processRunner: okRunner,
+    });
+
+    await expect(readFile(join(expectedWorkspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      '# model = "<provider>/<model-id>"',
+    );
+    await expect(readFile(join(expectedWorkspacePath, "README.md"), "utf-8")).resolves.toContain(
+      "Add a `[leaf].model` entry manually",
+    );
+  });
+
   it("reports an actionable error for invalid resolved TOML configuration", async () => {
     const root = await tempDir();
     const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");

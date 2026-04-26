@@ -2,7 +2,7 @@
 
 `lambda_rlm` is an **agent-invoked Pi tool** for asking questions over files that are too large, too numerous, or too awkward to paste into the parent agent conversation.
 
-Beginner version: install the Pi package, restart or `/reload` Pi so extension load creates the **Lambda-RLM User Workspace** at `~/.pi/lambda-rlm/`, run `/lambda-rlm-doctor` to choose a Formal Leaf model, then ask Pi a question that references one or more file paths. The agent decides when calling `lambda_rlm` is better than reading those files directly.
+Beginner version: install the Pi package, restart or `/reload` Pi so extension load creates the **Lambda-RLM User Workspace** at `~/.pi/lambda-rlm/`, add `[leaf].model` manually using a model that already works in Pi, run `/lambda-rlm-doctor` to validate setup, then ask Pi a question that references one or more file paths. The agent decides when calling `lambda_rlm` is better than reading those files directly.
 
 It is **not a provider or benchmark harness**. It is also not something most users call by hand. It is a Pi extension tool that protects the parent agent context budget by doing long-context file work behind a tool boundary.
 
@@ -36,11 +36,12 @@ After installing, start a new Pi session or run:
 
 When the extension loads after install, Workspace Scaffolding creates `~/.pi/lambda-rlm/` if it is missing and shows a one-time Scaffold Notification. The scaffold is non-destructive: existing `config.toml`, `README.md`, Copied Example Fixtures, and prompt overlays are never overwritten.
 
-The generated `config.toml` is a Transparent Sparse Config Scaffold. It is valid TOML before model selection, keeps the Formal Leaf model commented so no billable model is auto-selected, and documents Run Control Policy defaults as comments instead of active copied overrides:
+The generated `config.toml` is a Transparent Sparse Config Scaffold. It is valid TOML before model setup, keeps the Formal Leaf model commented so no billable model is auto-selected, and documents Run Control Policy defaults as comments instead of active copied overrides:
 
 ```toml
 [leaf]
-# Choose a Formal Leaf model with /lambda-rlm-doctor before real Lambda-RLM runs.
+# Add a Formal Leaf model manually before real Lambda-RLM runs.
+# Use a model accepted by Pi, for example: model = "<provider>/<model-id>"
 # model = "<provider>/<model-id>"
 thinking = "off"
 pi_executable = "pi"
@@ -57,15 +58,16 @@ pi_executable = "pi"
 # model_process_concurrency = 2
 ```
 
-### 3. Choose the Formal Leaf model
+### 3. Configure the Formal Leaf model manually
 
-`lambda_rlm` services Lambda-RLM model callbacks by spawning constrained child Pi processes. Those child calls need an explicit Pi model. Run the Doctor Command and choose or edit `[leaf].model` when prompted:
+`lambda_rlm` services Lambda-RLM model callbacks by spawning constrained child Pi processes. Those child calls need an explicit Pi model. Add `[leaf].model` to `~/.pi/lambda-rlm/config.toml` manually using a model that already works in Pi:
 
-```text
-/lambda-rlm-doctor
+```toml
+[leaf]
+model = "<provider>/<model-id>"
 ```
 
-Pick a model that already works in Pi. Useful ways to find one:
+Useful ways to find a working model:
 
 ```bash
 pi --list-models

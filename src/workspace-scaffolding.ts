@@ -20,7 +20,8 @@ export function defaultLambdaRlmUserWorkspacePath() {
 }
 
 export const TRANSPARENT_SPARSE_CONFIG_SCAFFOLD = `[leaf]
-# Choose a Formal Leaf model with /lambda-rlm-doctor before real Lambda-RLM runs.
+# Add a Formal Leaf model manually before real Lambda-RLM runs.
+# Use a model accepted by Pi, for example: model = "<provider>/<model-id>"
 # model = "<provider>/<model-id>"
 thinking = "off"
 pi_executable = "pi"
@@ -43,13 +44,19 @@ This directory is the global Lambda-RLM User Workspace. Workspace Scaffolding cr
 
 Next steps:
 
-1. Run \`/lambda-rlm-doctor\` in Pi.
-2. Choose a Formal Leaf model when doctor offers setup.
-3. Inspect or edit the Copied Example Fixtures under \`examples/\`.
+1. Inspect or edit \`config.toml\` and the Copied Example Fixtures under \`examples/\`.
+2. Add a \`[leaf].model\` entry manually before real Lambda-RLM runs, using a model that already works in Pi:
+
+   \`\`\`toml
+   [leaf]
+   model = "<provider>/<model-id>"
+   \`\`\`
+
+3. Run \`/lambda-rlm-doctor\` in Pi to validate setup and read any manual remediation it reports.
 
 ## Files
 
-- \`config.toml\` is a Transparent Sparse Config Scaffold. It is valid before model selection and intentionally leaves \`[leaf].model\` commented so Lambda-RLM never auto-selects a billable model.
+- \`config.toml\` is a Transparent Sparse Config Scaffold. It is valid before model setup and intentionally leaves \`[leaf].model\` commented so Lambda-RLM never auto-selects a billable model.
 - \`examples/\` contains user-editable Copied Example Fixtures copied from the package examples. Missing examples may be restored, but existing files are never overwritten.
 - \`prompts/\` is not created automatically. Create sparse prompt overlays there only when you intentionally take ownership of prompt behavior.
 `;

@@ -1,3 +1,4 @@
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   FORMAL_LEAF_READ_ONLY_TOOLS,
@@ -456,10 +457,23 @@ async function mockBridgeCheck(
   );
 }
 
+function doctorScaffoldWorkspacePath(options: DoctorOptions) {
+  if (options.workspacePath) {
+    return options.workspacePath;
+  }
+  if (options.globalConfigPath) {
+    return dirname(options.globalConfigPath);
+  }
+  if (options.homeDir) {
+    return join(options.homeDir, ".pi", "lambda-rlm");
+  }
+}
+
 export async function runLambdaRlmDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
-  if (process.env.NODE_ENV !== "test" || options.workspacePath) {
+  const scaffoldWorkspacePath = doctorScaffoldWorkspacePath(options);
+  if (process.env.NODE_ENV !== "test" || scaffoldWorkspacePath) {
     await ensureLambdaRlmUserWorkspace(
-      options.workspacePath ? { workspacePath: options.workspacePath } : {},
+      scaffoldWorkspacePath ? { workspacePath: scaffoldWorkspacePath } : {},
     );
   }
   const cwd = options.cwd ?? process.cwd();

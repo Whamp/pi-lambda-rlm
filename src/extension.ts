@@ -122,14 +122,14 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
     );
     if (scaffold.createdWorkspace) {
       void pi.ui?.notify?.(
-        "Lambda-RLM User Workspace created. Run /lambda-rlm-doctor to choose a Formal Leaf model.",
+        "Lambda-RLM User Workspace created. Add [leaf].model manually, then run /lambda-rlm-doctor to validate setup.",
       );
     }
   }
 
   pi.registerCommand?.("lambda-rlm-doctor", {
     description:
-      "Runs non-mutating Lambda-RLM MVP setup diagnostics for Python, config, prompts, fork seams, Pi leaf command shape, and mock bridge readiness.",
+      "Runs non-destructive, workspace-ensuring Lambda-RLM MVP setup diagnostics for Python, config, prompts, fork seams, Pi leaf command shape, and mock bridge readiness.",
     async handler(...args: unknown[]) {
       const ctx = commandContextFromArgs(args);
       const report = await runLambdaRlmDoctor({

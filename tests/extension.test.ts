@@ -216,6 +216,14 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(notifications).toHaveLength(1);
   });
 
+  it("describes the doctor command as non-destructive workspace-ensuring diagnostics", () => {
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension);
+
+    expect(command.options.description).toMatch(/non-destructive/i);
+    expect(command.options.description).toMatch(/workspace-ensuring/i);
+    expect(command.options.description).not.toMatch(/non-mutating/i);
+  });
+
   it("registers a lambda_rlm tool with a strict path-based schema and optional per-run tightening", () => {
     const tool = registeredLambdaRlmTool();
 
@@ -396,13 +404,13 @@ describe("lambda_rlm Pi extension registration", () => {
     });
   });
 
-  it("registers a non-mutating doctor command with Pi's two-argument command API", () => {
+  it("registers a non-destructive doctor command with Pi's two-argument command API", () => {
     const command = registeredLambdaRlmCommand();
 
     expect(command).toBeTruthy();
     expect(command.name).toBe("lambda-rlm-doctor");
     expect(command.name).not.toMatch(/^\//);
-    expect(command.options.description).toMatch(/non-mutating/i);
+    expect(command.options.description).toMatch(/non-destructive/i);
     expect(command.options.description).toMatch(/Python|config|prompts|mock bridge/i);
     expect(command.options.handler).toStrictEqual(expect.any(Function));
   });

@@ -59,7 +59,12 @@ describe("Lambda-RLM User Workspace Scaffolding", () => {
       config: { leaf: { piExecutable: "pi", thinking: "off" } },
     });
 
-    await expect(read(join(workspacePath, "README.md"))).resolves.toContain("/lambda-rlm-doctor");
+    const workspaceReadme = await read(join(workspacePath, "README.md"));
+    expect(workspaceReadme).toContain("/lambda-rlm-doctor");
+    expect(workspaceReadme).toContain("Add a `[leaf].model` entry manually");
+    expect(workspaceReadme).not.toMatch(
+      /doctor (chooses|offers setup|writes)|model picker|model selection/i,
+    );
     await expect(
       read(join(workspacePath, "examples", "multi-file-qa", "README.md")),
     ).resolves.toContain("Multi-file QA");
