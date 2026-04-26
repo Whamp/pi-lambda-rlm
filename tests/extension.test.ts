@@ -47,7 +47,16 @@ interface RegisteredCommand {
     description: string;
     handler: (context: {
       cwd: string;
-      ui?: { notify?: (message: string) => void | Promise<void> };
+      leafProcessRunner?: (invocation: ProcessInvocation) => ProcessResult | Promise<ProcessResult>;
+      ui?: {
+        notify?: (message: string) => void | Promise<void>;
+        promptText?: (prompt: string) => string | Promise<string>;
+        select?: (
+          prompt: string,
+          choices: { id: string }[],
+          defaultChoiceId?: string,
+        ) => string | Promise<string>;
+      };
     }) => Promise<ToolResult>;
   };
 }
@@ -86,6 +95,21 @@ function firstContentText(result: ToolResult) {
   }
   return content.text;
 }
+
+const okDoctorRunner = (invocation: ProcessInvocation): ProcessResult => {
+  if (invocation.args.includes("--version")) {
+    return { exitCode: 0, stderr: "", stdout: `${invocation.command} test version` };
+  }
+  return {
+    exitCode: 0,
+    stderr: "",
+    stdout: JSON.stringify({
+      missing: [],
+      ok: true,
+      seams: ["LambdaRLM.client", "LambdaPromptRegistry", "completion_with_metadata path"],
+    }),
+  };
+};
 
 function registeredTools(
   register: typeof registerLambdaRlmExtension = registerLambdaRlmExtension,
@@ -454,6 +478,46 @@ describe("lambda_rlm Pi extension registration", () => {
     await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
       '# model = "<provider>/<model-id>"',
     );
+  });
+
+  it("supports in-flow manual Formal Leaf model entry, writes the global config by default, and reruns diagnostics", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-model-flow-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const selections: string[] = [];
+    const prompts: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "local/qwen";
+        },
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return "select_formal_leaf_model";
+        },
+      },
+    });
+
+    const text = firstContentText(result);
+    expect(selections[0]).toContain("select_formal_leaf_model");
+    expect(prompts[0]).toMatch(/manual Formal Leaf model/i);
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'model = "local/qwen"',
+    );
+    expect(text).toContain(
+      "Formal Leaf Model Selection wrote local/qwen to Global Tool Configuration",
+    );
+    expect(text.match(/Diagnostics:/g)).toHaveLength(2);
+    expect(result.details).toMatchObject({
+      modelWrite: { model: "local/qwen", target: "global" },
+      rerun: { ok: true },
+    });
   });
 
   it("loads the Pi extension entrypoint and registers the lambda_rlm tool", () => {
