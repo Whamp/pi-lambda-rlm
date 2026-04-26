@@ -2,8 +2,9 @@ import { dirname, join } from "node:path";
 import { Type } from "typebox";
 import { executeLambdaRlmTool, LambdaRlmValidationError } from "./lambda-rlm-tool.js";
 import { buildDoctorActionMenu, renderDoctorCommandOutput, runLambdaRlmDoctor } from "./doctor.js";
-import { resolveLambdaRlmConfigWithSources } from "./config-resolver.js";
+import { LEAF_THINKING_VALUES, resolveLambdaRlmConfigWithSources } from "./config-resolver.js";
 import type { DoctorOptions } from "./doctor.js";
+import type { LeafThinking } from "./config-resolver.js";
 import {
   MANUAL_MODEL_ENTRY_ID,
   SHOW_ALL_REGISTERED_MODELS_ID,
@@ -14,6 +15,7 @@ import type { CandidateLeafModel } from "./model-candidates.js";
 import {
   normalizeRewriteInvalidConfig,
   writeFormalLeafModelSelection,
+  writeFormalLeafThinkingSelection,
 } from "./targeted-config-edit.js";
 import { ensureLambdaRlmUserWorkspace } from "./workspace-scaffolding.js";
 import type { ProcessRunner } from "./leaf-runner.js";
@@ -212,6 +214,26 @@ async function selectExpandedCandidate(args: {
   return args.candidates.find((candidate) => candidate.id === expandedChoice);
 }
 
+function thinkingChoice(thinking: LeafThinking) {
+  return {
+    id: thinking,
+    label: thinking,
+    description:
+      thinking === "off"
+        ? "Default Formal Leaf Thinking Selection baseline; no additional thinking requested."
+        : `Set [leaf].thinking to ${thinking}.`,
+  };
+}
+
+async function chooseFormalLeafThinking(ctx: MinimalCommandContext) {
+  const selected = await ctx.ui?.select?.(
+    "Choose a supported value for Formal Leaf Thinking Selection.",
+    LEAF_THINKING_VALUES.map(thinkingChoice),
+    "off",
+  );
+  return LEAF_THINKING_VALUES.find((value) => value === selected);
+}
+
 async function chooseFormalLeafModel(ctx: MinimalCommandContext) {
   if (!ctx.modelRegistry) {
     return promptManualFormalLeafModel(ctx);
@@ -323,6 +345,22 @@ async function rewriteInvalidConfig(args: InteractiveRepairArgs) {
   };
 }
 
+async function blockUnsafeThinkingSelection(args: InteractiveRepairArgs) {
+  const combinedText = `${args.initialText}\n\nFormal Leaf Thinking Selection was not started because initial diagnostics reported invalid Lambda-RLM configuration. Fix the TOML/config error first, then rerun /lambda-rlm-doctor.`;
+  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  return {
+    content: [{ text: combinedText, type: "text" }],
+    details: {
+      ...args.report,
+      actions: args.menu,
+      blockedAction: {
+        id: "change_formal_leaf_thinking",
+        reason: "initial_config_error",
+      },
+    },
+  };
+}
+
 async function blockUnsafeModelSelection(args: InteractiveRepairArgs) {
   const combinedText = `${args.initialText}\n\nFormal Leaf Model Selection was not started because initial diagnostics reported invalid Lambda-RLM configuration. Fix the TOML/config error first, then rerun /lambda-rlm-doctor.`;
   await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
@@ -335,6 +373,71 @@ async function blockUnsafeModelSelection(args: InteractiveRepairArgs) {
         id: "select_formal_leaf_model",
         reason: "initial_config_error",
       },
+    },
+  };
+}
+
+async function runInteractiveThinkingSelection(args: InteractiveRepairArgs) {
+  const thinking = await chooseFormalLeafThinking(args.ctx);
+  if (!thinking) {
+    return;
+  }
+  const globalConfigPath =
+    globalConfigPathForWorkspace(args.piWorkspacePath) ?? defaultGlobalConfigPath();
+  const thinkingWrite = await writeFormalLeafThinkingSelection({
+    configPath: globalConfigPath,
+    thinking,
+  });
+  const combinedText = `${args.initialText}\n\nFormal Leaf Thinking Selection wrote ${thinkingWrite.thinking} to Global Tool Configuration (${thinkingWrite.configPath}) using a Targeted Config Edit (${thinkingWrite.kind}); no automatic full diagnostic rerun was required for this thinking-only change.`;
+  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  return {
+    content: [{ text: combinedText, type: "text" }],
+    details: {
+      ...args.report,
+      actions: args.menu,
+      thinkingWrite: { ...thinkingWrite, target: "global" },
+    },
+  };
+}
+
+async function runInteractiveModelSelection(args: InteractiveRepairArgs) {
+  const model = await chooseFormalLeafModel(args.ctx);
+  if (!model?.trim()) {
+    return;
+  }
+
+  const globalConfigPath =
+    globalConfigPathForWorkspace(args.piWorkspacePath) ?? defaultGlobalConfigPath();
+  const projectConfigPath = defaultProjectConfigPath(args.ctx.cwd ?? process.cwd());
+  const selectedTarget = await selectModelWriteTarget({
+    ctx: args.ctx,
+    doctorOptions: args.doctorOptions,
+    globalConfigPath,
+    projectConfigPath,
+  });
+  if (!selectedTarget) {
+    return;
+  }
+  const writeTarget = selectedTarget === "project" ? projectConfigPath : globalConfigPath;
+  const modelWrite = await writeFormalLeafModelSelection({ configPath: writeTarget, model });
+  const targetLabel =
+    selectedTarget === "project" ? "Project Tool Configuration" : "Global Tool Configuration";
+  const rerun = await runLambdaRlmDoctor({
+    ...args.doctorOptions,
+    globalConfigPath,
+    projectConfigPath,
+    workspacePath: args.piWorkspacePath ?? dirname(globalConfigPath),
+  });
+  const rerunText = renderDoctorCommandOutput(rerun, { interactive: true });
+  const combinedText = `${args.initialText}\n\nFormal Leaf Model Selection wrote ${modelWrite.model} to ${targetLabel} (${modelWrite.configPath}) using a Targeted Config Edit (${modelWrite.kind}).\n\nDiagnostics after Formal Leaf Model Selection write:\n${rerunText}`;
+  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  return {
+    content: [{ text: combinedText, type: "text" }],
+    details: {
+      ...args.report,
+      actions: args.menu,
+      modelWrite: { ...modelWrite, target: selectedTarget },
+      rerun,
     },
   };
 }
@@ -368,51 +471,17 @@ async function maybeRunInteractiveModelSelection(args: {
   if (selectedAction === "rewrite_invalid_config_normalized") {
     return rewriteInvalidConfig(repairArgs);
   }
+  if (selectedAction === "change_formal_leaf_thinking") {
+    return initialConfigError
+      ? blockUnsafeThinkingSelection(repairArgs)
+      : runInteractiveThinkingSelection(repairArgs);
+  }
   if (selectedAction !== "select_formal_leaf_model") {
     return;
   }
-  if (initialConfigError) {
-    return blockUnsafeModelSelection(repairArgs);
-  }
-  const model = await chooseFormalLeafModel(args.ctx);
-  if (!model?.trim()) {
-    return;
-  }
-
-  const globalConfigPath =
-    globalConfigPathForWorkspace(args.piWorkspacePath) ?? defaultGlobalConfigPath();
-  const projectConfigPath = defaultProjectConfigPath(args.ctx.cwd ?? process.cwd());
-  const selectedTarget = await selectModelWriteTarget({
-    ctx: args.ctx,
-    doctorOptions: args.doctorOptions,
-    globalConfigPath,
-    projectConfigPath,
-  });
-  if (!selectedTarget) {
-    return;
-  }
-  const writeTarget = selectedTarget === "project" ? projectConfigPath : globalConfigPath;
-  const modelWrite = await writeFormalLeafModelSelection({ configPath: writeTarget, model });
-  const targetLabel =
-    selectedTarget === "project" ? "Project Tool Configuration" : "Global Tool Configuration";
-  const rerun = await runLambdaRlmDoctor({
-    ...args.doctorOptions,
-    globalConfigPath,
-    projectConfigPath,
-    workspacePath: args.piWorkspacePath ?? dirname(globalConfigPath),
-  });
-  const rerunText = renderDoctorCommandOutput(rerun, { interactive: true });
-  const combinedText = `${args.initialText}\n\nFormal Leaf Model Selection wrote ${modelWrite.model} to ${targetLabel} (${modelWrite.configPath}) using a Targeted Config Edit (${modelWrite.kind}).\n\nDiagnostics after Formal Leaf Model Selection write:\n${rerunText}`;
-  await args.ctx.ui.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
-  return {
-    content: [{ text: combinedText, type: "text" }],
-    details: {
-      ...args.report,
-      actions: args.menu,
-      modelWrite: { ...modelWrite, target: selectedTarget },
-      rerun,
-    },
-  };
+  return initialConfigError
+    ? blockUnsafeModelSelection(repairArgs)
+    : runInteractiveModelSelection(repairArgs);
 }
 
 export default function registerLambdaRlmExtension(pi: MinimalPiApi) {

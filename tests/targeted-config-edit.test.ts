@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   normalizeRewriteInvalidConfig,
   writeFormalLeafModelSelection,
+  writeFormalLeafThinkingSelection,
 } from "../src/targeted-config-edit.js";
 
 async function tempConfig(content?: string) {
@@ -15,6 +16,69 @@ async function tempConfig(content?: string) {
   }
   return configPath;
 }
+
+describe("Targeted Config Edit for Formal Leaf Thinking Selection", () => {
+  it("updates existing leaf thinking assignments in place while preserving comments and ordering", async () => {
+    const configPath = await tempConfig(
+      `# top comment\n[leaf]\nmodel = "local/qwen"\nthinking = "off" # baseline\npi_executable = "pi"\n\n[run]\nmax_model_calls = 3\n`,
+    );
+
+    const result = await writeFormalLeafThinkingSelection({ configPath, thinking: "high" });
+
+    await expect(readFile(configPath, "utf-8")).resolves.toBe(
+      `# top comment\n[leaf]\nmodel = "local/qwen"\nthinking = "high" # baseline\npi_executable = "pi"\n\n[run]\nmax_model_calls = 3\n`,
+    );
+    expect(result.kind).toBe("updated_existing_assignment");
+  });
+
+  it("uncomments and updates commented scaffold thinking lines", async () => {
+    const configPath = await tempConfig(
+      `[leaf]\nmodel = "local/qwen"\n# thinking = "off"\npi_executable = "pi"\n`,
+    );
+
+    const result = await writeFormalLeafThinkingSelection({ configPath, thinking: "medium" });
+
+    await expect(readFile(configPath, "utf-8")).resolves.toBe(
+      `[leaf]\nmodel = "local/qwen"\nthinking = "medium"\npi_executable = "pi"\n`,
+    );
+    expect(result.kind).toBe("uncommented_scaffold_assignment");
+  });
+
+  it("appends missing thinking assignments inside an existing leaf table without reordering comments", async () => {
+    const configPath = await tempConfig(
+      `[leaf]\n# keep leaf note\nmodel = "local/qwen"\n\n[run]\nmax_model_calls = 3\n`,
+    );
+
+    const result = await writeFormalLeafThinkingSelection({ configPath, thinking: "minimal" });
+
+    await expect(readFile(configPath, "utf-8")).resolves.toBe(
+      `[leaf]\n# keep leaf note\nmodel = "local/qwen"\nthinking = "minimal"\n\n[run]\nmax_model_calls = 3\n`,
+    );
+    expect(result.kind).toBe("appended_to_existing_leaf_table");
+  });
+
+  it("adds a leaf table for missing thinking assignments when no leaf table exists", async () => {
+    const configPath = await tempConfig(`[run]\nmax_model_calls = 3\n`);
+
+    const result = await writeFormalLeafThinkingSelection({ configPath, thinking: "low" });
+
+    await expect(readFile(configPath, "utf-8")).resolves.toBe(
+      `[run]\nmax_model_calls = 3\n\n[leaf]\nthinking = "low"\n`,
+    );
+    expect(result.kind).toBe("added_leaf_table");
+  });
+
+  it("rejects unsupported Formal Leaf thinking values using the validation contract", async () => {
+    const configPath = await tempConfig(`[leaf]\nmodel = "local/qwen"\n`);
+
+    await expect(
+      writeFormalLeafThinkingSelection({ configPath, thinking: "max" as never }),
+    ).rejects.toThrow(
+      "Formal Leaf thinking must be one of: off, minimal, low, medium, high, xhigh.",
+    );
+    await expect(readFile(configPath, "utf-8")).resolves.toBe(`[leaf]\nmodel = "local/qwen"\n`);
+  });
+});
 
 describe("Targeted Config Edit for Formal Leaf Model Selection", () => {
   it("updates existing leaf model assignments in place while preserving comments and ordering", async () => {
