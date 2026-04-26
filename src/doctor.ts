@@ -93,11 +93,11 @@ function check(
 }
 
 function defaultBridgePath() {
-  return fileURLToPath(new URL("../.pi/extensions/lambda-rlm/bridge.py", import.meta.url));
+  return fileURLToPath(new URL("../extensions/lambda-rlm/bridge.py", import.meta.url));
 }
 
 function vendoredRlmPath() {
-  return fileURLToPath(new URL("../.pi/extensions/lambda-rlm", import.meta.url));
+  return fileURLToPath(new URL("../extensions/lambda-rlm", import.meta.url));
 }
 
 function firstLine(text: string) {
@@ -247,7 +247,7 @@ async function lambdaRlmDependencyChecks(processRunner: ProcessRunner, pythonPat
             probe.error ? String(probe.error) : firstLine(seamProbe.stderr) || "Python probe failed"
           }.`,
           { pythonPath, stderr: seamProbe.stderr },
-          "Restore the vendored .pi/extensions/lambda-rlm/rlm package or configure Python so the vendored package imports; doctor will not pip install dependencies.",
+          "Restore the vendored extensions/lambda-rlm/rlm package or configure Python so the vendored package imports; doctor will not pip install dependencies.",
         );
 
   const missing = Array.isArray(probe.missing) ? probe.missing.map(String) : ["unknown seam"];

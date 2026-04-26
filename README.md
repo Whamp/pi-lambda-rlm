@@ -157,13 +157,13 @@ The agent should call `lambda_rlm` with paths and a question when it needs bound
 This package declares itself as a Pi package with this extension entrypoint:
 
 ```text
-.pi/extensions/lambda-rlm/index.ts
+extensions/lambda-rlm/index.ts
 ```
 
 Runtime assets are included under:
 
 ```text
-.pi/extensions/lambda-rlm/
+extensions/lambda-rlm/
   bridge.py
   prompts/
   prompt-templates/
@@ -263,7 +263,7 @@ Invalid TOML, unknown tables, unknown keys, duplicate keys, non-positive `[run]`
 Built-in prompt defaults live in:
 
 ```text
-.pi/extensions/lambda-rlm/prompts/
+extensions/lambda-rlm/prompts/
 ```
 
 Operators may override individual prompts by creating sparse Markdown overlays:
@@ -296,7 +296,7 @@ Prompt templates use strict placeholders such as `<<text>>`, `<<query>>`, `<<met
 Copyable prompt examples live in:
 
 ```text
-.pi/extensions/lambda-rlm/prompt-templates/
+extensions/lambda-rlm/prompt-templates/
 ```
 
 Those templates are **manual copy only**. Runtime loading never creates or mutates operator-owned prompt overlays.
@@ -415,7 +415,7 @@ From a checkout:
 npm ci
 npm test
 npm run typecheck
-python3 -m py_compile .pi/extensions/lambda-rlm/bridge.py $(find .pi/extensions/lambda-rlm/rlm -name '*.py' -type f | sort)
+python3 -m py_compile extensions/lambda-rlm/bridge.py $(find extensions/lambda-rlm/rlm -name '*.py' -type f | sort)
 ```
 
 Real smoke tests require a working Pi model in `~/.pi/lambda-rlm/config.toml` or project `.pi/lambda-rlm/config.toml`:
@@ -431,9 +431,15 @@ Then run:
 npm run test:pi-leaf-smoke
 ```
 
-This repository also includes a project-local dogfooding entrypoint at `.pi/extensions/lambda-rlm/index.ts`. When Pi starts in this checkout, that entrypoint registers `lambda_rlm` even before a global install. After editing extension code, run `/reload` or restart Pi.
+For local development, install this checkout as a Pi package:
 
-Important gotcha: Pi sends registered tool schemas to the active model provider before the agent can answer a prompt. An invalid `lambda_rlm` schema can therefore break unrelated requests in this repository even if the agent never calls the tool. Keep public tool parameter schemas provider-compatible: top-level object schemas only, with conditional rules enforced in runtime validation.
+```bash
+pi install /absolute/path/to/pi-lambda-rlm
+```
+
+Local path installs are not copied, so edits in the checkout are picked up after `/reload` or a Pi restart. The repo intentionally does not ship a `.pi/extensions/` auto-discovery entrypoint; loading the extension should be explicit through `pi install`.
+
+Important gotcha: Pi sends registered tool schemas to the active model provider before the agent can answer a prompt. An invalid `lambda_rlm` schema can therefore break requests in any session where the package is installed, even if the agent never calls the tool. Keep public tool parameter schemas provider-compatible: top-level object schemas only, with conditional rules enforced in runtime validation.
 
 ## MVP non-goals
 
@@ -460,8 +466,8 @@ This project is an integration layer. It does not claim credit for the underlyin
 With thanks to:
 
 - **Original RLM repository:** [alexzhang13/rlm](https://github.com/alexzhang13/rlm), the Recursive Language Models implementation and research code by Alex L. Zhang and collaborators. The upstream repository is MIT licensed and is the source of the “normal RLM” components that Lambda-RLM builds on.
-- **Lambda-RLM repository:** [lambda-calculus-LLM/lambda-RLM](https://github.com/lambda-calculus-LLM/lambda-RLM), the λ-RLM implementation for typed recursive long-context reasoning. This repository vendors a local/forked copy from commit `3874d393483dc4299101918cf8e9af670194bd88` under `.pi/extensions/lambda-rlm/rlm/`.
+- **Lambda-RLM repository:** [lambda-calculus-LLM/lambda-RLM](https://github.com/lambda-calculus-LLM/lambda-RLM), the λ-RLM implementation for typed recursive long-context reasoning. This repository vendors a local/forked copy from commit `3874d393483dc4299101918cf8e9af670194bd88` under `extensions/lambda-rlm/rlm/`.
 
-The vendored Lambda-RLM package is MIT licensed. Keep the upstream license notice at `.pi/extensions/lambda-rlm/rlm/LICENSE` and the local fork boundary notes at `.pi/extensions/lambda-rlm/rlm/LOCAL_FORK.md` when updating, pruning, or replacing the vendored code.
+The vendored Lambda-RLM package is MIT licensed. Keep the upstream license notice at `extensions/lambda-rlm/rlm/LICENSE` and the local fork boundary notes at `extensions/lambda-rlm/rlm/LOCAL_FORK.md` when updating, pruning, or replacing the vendored code.
 
 This repository adds the Pi-specific boundary: path-based tool validation, TOML run controls, prompt overlays, the Python NDJSON bridge, constrained Formal Leaf Pi callbacks, diagnostics, and bounded result formatting.

@@ -71,16 +71,9 @@ describe("operator docs and examples", () => {
 
     expect(pkg.private).not.toBeTruthy();
     expect(pkg.keywords).toContain("pi-package");
-    expect(pkg.pi?.extensions).toContain(".pi/extensions/lambda-rlm/index.ts");
+    expect(pkg.pi?.extensions).toContain("extensions/lambda-rlm/index.ts");
     expect(pkg.files).toStrictEqual(
-      expect.arrayContaining([
-        "src/",
-        "README.md",
-        ".pi/extensions/lambda-rlm/index.ts",
-        ".pi/extensions/lambda-rlm/bridge.py",
-        ".pi/extensions/lambda-rlm/prompts/",
-        ".pi/extensions/lambda-rlm/rlm/**/*.py",
-      ]),
+      expect.arrayContaining(["src/", "README.md", "examples/", "extensions/lambda-rlm/"]),
     );
   });
 

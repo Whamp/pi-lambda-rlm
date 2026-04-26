@@ -50,6 +50,10 @@ export interface LambdaRlmToolResult {
   details: Record<string, unknown>;
 }
 
+export function defaultLambdaRlmBridgePath() {
+  return fileURLToPath(new URL("../extensions/lambda-rlm/bridge.py", import.meta.url));
+}
+
 export interface ExecuteLambdaRlmToolOptions {
   cwd?: string;
   bridgePath?: string;
@@ -860,9 +864,7 @@ export async function executeLambdaRlmTool(
   const { loadedSources } = sources;
   const sourceMetadata = loadedSources.map(toSourceMetadata);
   const assembledContext = assembleSourceContext(loadedSources);
-  const bridgePath =
-    options.bridgePath ??
-    fileURLToPath(new URL("../.pi/extensions/lambda-rlm/bridge.py", import.meta.url));
+  const bridgePath = options.bridgePath ?? defaultLambdaRlmBridgePath();
   const runId = `lambda-rlm-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const leafModel = resolvedLeafModel(options, leafConfig);
   if (!leafModel) {

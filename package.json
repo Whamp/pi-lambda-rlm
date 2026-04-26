@@ -11,19 +11,13 @@
     "README.md",
     "src/",
     "examples/",
-    ".pi/extensions/lambda-rlm/index.ts",
-    ".pi/extensions/lambda-rlm/bridge.py",
-    ".pi/extensions/lambda-rlm/prompts/",
-    ".pi/extensions/lambda-rlm/prompt-templates/",
-    ".pi/extensions/lambda-rlm/rlm/**/*.py",
-    ".pi/extensions/lambda-rlm/rlm/LICENSE",
-    ".pi/extensions/lambda-rlm/rlm/LOCAL_FORK.md"
+    "extensions/lambda-rlm/"
   ],
   "type": "module",
   "scripts": {
     "lint": "ultracite check",
     "lint:fix": "ultracite fix",
-    "test": "vitest run --exclude tests/pi-leaf-smoke.test.ts",
+    "test": "vitest run --exclude tests/pi-leaf-smoke.test.ts --exclude .worktrees/**",
     "test:pi-leaf-smoke": "vitest run tests/pi-leaf-smoke.test.ts",
     "typecheck": "tsc --noEmit"
   },
@@ -40,7 +34,7 @@
   },
   "pi": {
     "extensions": [
-      ".pi/extensions/lambda-rlm/index.ts"
+      "extensions/lambda-rlm/index.ts"
     ]
   }
 }

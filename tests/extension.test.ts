@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import registerLambdaRlmExtension from "../src/extension.js";
-import registerLambdaRlmEntrypoint from "../.pi/extensions/lambda-rlm/index.js";
+import registerLambdaRlmEntrypoint from "../extensions/lambda-rlm/index.js";
 import type { ProcessInvocation, ProcessResult } from "../src/leaf-runner.js";
 
 interface ToolContent {
@@ -290,7 +290,7 @@ describe("lambda_rlm Pi extension registration", () => {
     const registrations = [
       { source: "src/extension.ts", tools: registeredTools(registerLambdaRlmExtension) },
       {
-        source: ".pi/extensions/lambda-rlm/index.ts",
+        source: "extensions/lambda-rlm/index.ts",
         tools: registeredTools(registerLambdaRlmEntrypoint),
       },
     ];
