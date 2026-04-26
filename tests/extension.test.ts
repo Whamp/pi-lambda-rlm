@@ -797,6 +797,74 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(result.details).not.toHaveProperty("rerun");
   });
 
+  it("offers invalid-config repair choices and preserves config when the interactive user cancels", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-invalid-cancel-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const invalidConfig = `[leaf]\nmodel = `;
+    await writeFile(join(workspacePath, "config.toml"), invalidConfig, "utf-8");
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return "cancel_invalid_config_repair";
+        },
+      },
+    });
+
+    expect(selections[0]).toContain("repair choices for invalid config");
+    expect(selections[0]).toContain("cancel_invalid_config_repair");
+    expect(selections[0]).toContain("rewrite_invalid_config_normalized");
+    expect(firstContentText(result)).toContain("Invalid config repair was cancelled");
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toBe(
+      invalidConfig,
+    );
+    expect(result.details).toMatchObject({
+      invalidConfigRepair: { action: "cancel_invalid_config_repair", rewritten: false },
+    });
+  });
+
+  it("performs confirmed normalized rewrite of invalid config with a backup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-invalid-rewrite-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const configPath = join(workspacePath, "config.toml");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const invalidConfig = `[leaf]\nmodel = `;
+    await writeFile(configPath, invalidConfig, "utf-8");
+    const prompts: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "REWRITE";
+        },
+        select: () => "rewrite_invalid_config_normalized",
+      },
+    });
+
+    expect(prompts[0]).toContain("Type REWRITE");
+    const details = result.details as { invalidConfigRepair?: { backupPath?: string } };
+    const backupPath = details.invalidConfigRepair?.backupPath;
+    expect(backupPath).toContain("config.toml.invalid.");
+    if (!backupPath) {
+      throw new Error("expected invalid config repair backup path");
+    }
+    await expect(readFile(backupPath, "utf-8")).resolves.toBe(invalidConfig);
+    await expect(readFile(configPath, "utf-8")).resolves.toContain(
+      '# model = "<provider>/<model-id>"',
+    );
+    expect(firstContentText(result)).toContain("confirmed normalized rewrite");
+  });
+
   it("loads the Pi extension entrypoint and registers the lambda_rlm tool", () => {
     const tool = registeredLambdaRlmTool(registerLambdaRlmEntrypoint);
 

@@ -1,5 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { parseConfigToml } from "./config-resolver.js";
+import { TRANSPARENT_SPARSE_CONFIG_SCAFFOLD } from "./workspace-scaffolding.js";
 
 export type FormalLeafModelWriteKind =
   | "updated_existing_assignment"
@@ -16,6 +18,24 @@ export interface FormalLeafModelWriteResult {
 export interface FormalLeafModelWriteOptions {
   configPath: string;
   model: string;
+}
+
+export interface NormalizedRewriteOptions {
+  configPath: string;
+  confirmed: boolean;
+}
+
+export type NormalizedRewriteResult =
+  | { configPath: string; rewritten: false }
+  | { backupPath: string; configPath: string; rewritten: true };
+
+export class UnsafeConfigEditError extends Error {
+  code = "unsafe_config_edit";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsafeConfigEditError";
+  }
 }
 
 function quoteTomlString(value: string) {
@@ -123,6 +143,22 @@ function editFormalLeafModel(text: string, model: string) {
   return { kind: "appended_to_existing_leaf_table" as const, text: lines.join("") };
 }
 
+function assertStructurallySafeConfig(text: string) {
+  if (!text.trim()) {
+    return;
+  }
+  const parsed = parseConfigToml(text);
+  if (!parsed.ok) {
+    throw new UnsafeConfigEditError(
+      `Targeted Config Edit is blocked because the Tool Configuration File is structurally unsafe to edit: ${parsed.error.message}`,
+    );
+  }
+}
+
+function timestampForBackup() {
+  return new Date().toISOString().replaceAll(/[:.]/g, "-");
+}
+
 export async function writeFormalLeafModelSelection({
   configPath,
   model,
@@ -132,8 +168,24 @@ export async function writeFormalLeafModelSelection({
     throw new Error("Formal Leaf model must be a non-empty string.");
   }
   const original = await readConfigIfPresent(configPath);
+  assertStructurallySafeConfig(original);
   const edit = editFormalLeafModel(original, trimmedModel);
   await mkdir(dirname(configPath), { recursive: true });
   await writeFile(configPath, edit.text, "utf-8");
   return { configPath, kind: edit.kind, model: trimmedModel };
+}
+
+export async function normalizeRewriteInvalidConfig({
+  configPath,
+  confirmed,
+}: NormalizedRewriteOptions): Promise<NormalizedRewriteResult> {
+  if (!confirmed) {
+    return { configPath, rewritten: false };
+  }
+  const original = await readConfigIfPresent(configPath);
+  await mkdir(dirname(configPath), { recursive: true });
+  const backupPath = `${configPath}.invalid.${timestampForBackup()}.bak`;
+  await writeFile(backupPath, original, "utf-8");
+  await writeFile(configPath, TRANSPARENT_SPARSE_CONFIG_SCAFFOLD, "utf-8");
+  return { backupPath, configPath, rewritten: true };
 }

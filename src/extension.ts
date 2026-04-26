@@ -11,7 +11,10 @@ import {
   resolveCandidateLeafModelSet,
 } from "./model-candidates.js";
 import type { CandidateLeafModel } from "./model-candidates.js";
-import { writeFormalLeafModelSelection } from "./targeted-config-edit.js";
+import {
+  normalizeRewriteInvalidConfig,
+  writeFormalLeafModelSelection,
+} from "./targeted-config-edit.js";
 import { ensureLambdaRlmUserWorkspace } from "./workspace-scaffolding.js";
 import type { ProcessRunner } from "./leaf-runner.js";
 import type { ModelCallConcurrencyQueue } from "./model-call-queue.js";
@@ -246,6 +249,68 @@ async function chooseFormalLeafModel(ctx: MinimalCommandContext) {
   return selectedModel?.id;
 }
 
+interface InteractiveRepairArgs {
+  ctx: MinimalCommandContext;
+  doctorOptions: DoctorOptions;
+  initialText: string;
+  menu: ReturnType<typeof buildDoctorActionMenu>;
+  piWorkspacePath?: string;
+  report: Awaited<ReturnType<typeof runLambdaRlmDoctor>>;
+}
+
+async function cancelInvalidConfigRepair(args: InteractiveRepairArgs) {
+  const combinedText = `${args.initialText}\n\nInvalid config repair was cancelled. No normalized rewrite occurred and the Tool Configuration File was left untouched.`;
+  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  return {
+    content: [{ text: combinedText, type: "text" }],
+    details: {
+      ...args.report,
+      actions: args.menu,
+      invalidConfigRepair: { action: "cancel_invalid_config_repair", rewritten: false },
+    },
+  };
+}
+
+async function rewriteInvalidConfig(args: InteractiveRepairArgs) {
+  const globalConfigPath =
+    globalConfigPathForWorkspace(args.piWorkspacePath) ?? defaultGlobalConfigPath();
+  const confirmation = await args.ctx.ui?.promptText?.(
+    `Type REWRITE to confirm normalized rewrite of invalid config at ${globalConfigPath}. A backup will be created before replacement.`,
+  );
+  const rewrite = await normalizeRewriteInvalidConfig({
+    configPath: globalConfigPath,
+    confirmed: confirmation === "REWRITE",
+  });
+  const combinedText = rewrite.rewritten
+    ? `${args.initialText}\n\nUser confirmed normalized rewrite. A backup was created at ${rewrite.backupPath} before replacing the Tool Configuration File with a normalized rewrite.`
+    : `${args.initialText}\n\nNo normalized rewrite occurred because explicit user confirmation was not provided.`;
+  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  return {
+    content: [{ text: combinedText, type: "text" }],
+    details: {
+      ...args.report,
+      actions: args.menu,
+      invalidConfigRepair: { action: "rewrite_invalid_config_normalized", ...rewrite },
+    },
+  };
+}
+
+async function blockUnsafeModelSelection(args: InteractiveRepairArgs) {
+  const combinedText = `${args.initialText}\n\nFormal Leaf Model Selection was not started because initial diagnostics reported invalid Lambda-RLM configuration. Fix the TOML/config error first, then rerun /lambda-rlm-doctor.`;
+  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  return {
+    content: [{ text: combinedText, type: "text" }],
+    details: {
+      ...args.report,
+      actions: args.menu,
+      blockedAction: {
+        id: "select_formal_leaf_model",
+        reason: "initial_config_error",
+      },
+    },
+  };
+}
+
 async function maybeRunInteractiveModelSelection(args: {
   ctx: MinimalCommandContext;
   doctorOptions: DoctorOptions;
@@ -254,34 +319,31 @@ async function maybeRunInteractiveModelSelection(args: {
   piWorkspacePath?: string;
   report: Awaited<ReturnType<typeof runLambdaRlmDoctor>>;
 }) {
-  if (!args.menu || !args.ctx.ui?.select || !args.ctx.ui.promptText) {
+  if (!args.menu || !args.ctx.ui?.select) {
     return;
   }
-  const selectedAction = await args.ctx.ui.select(
-    "Choose a Lambda-RLM Doctor Repair Flow action after diagnostics.",
-    args.menu.actions,
-    args.menu.defaultActionId,
-  );
-  if (selectedAction !== "select_formal_leaf_model") {
-    return;
-  }
+  const repairArgs = { ...args, menu: args.menu };
   const initialConfigError = args.report.checks.find(
     (check) => check.name === "config" && check.status === "error",
   );
+  const selectedAction = await args.ctx.ui.select(
+    initialConfigError
+      ? "Choose explicit repair choices for invalid config before any Doctor Repair Flow mutation."
+      : "Choose a Lambda-RLM Doctor Repair Flow action after diagnostics.",
+    args.menu.actions,
+    args.menu.defaultActionId,
+  );
+  if (selectedAction === "cancel_invalid_config_repair") {
+    return cancelInvalidConfigRepair(repairArgs);
+  }
+  if (selectedAction === "rewrite_invalid_config_normalized") {
+    return rewriteInvalidConfig(repairArgs);
+  }
+  if (selectedAction !== "select_formal_leaf_model") {
+    return;
+  }
   if (initialConfigError) {
-    const combinedText = `${args.initialText}\n\nFormal Leaf Model Selection was not started because initial diagnostics reported invalid Lambda-RLM configuration. Fix the TOML/config error first, then rerun /lambda-rlm-doctor.`;
-    await args.ctx.ui.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
-    return {
-      content: [{ text: combinedText, type: "text" }],
-      details: {
-        ...args.report,
-        actions: args.menu,
-        blockedAction: {
-          id: "select_formal_leaf_model",
-          reason: "initial_config_error",
-        },
-      },
-    };
+    return blockUnsafeModelSelection(repairArgs);
   }
   const model = await chooseFormalLeafModel(args.ctx);
   if (!model?.trim()) {

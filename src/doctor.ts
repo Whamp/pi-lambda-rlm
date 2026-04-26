@@ -31,7 +31,9 @@ export type DoctorActionId =
   | "select_formal_leaf_model"
   | "keep_current_configuration"
   | "change_formal_leaf_thinking"
-  | "show_config_paths";
+  | "show_config_paths"
+  | "cancel_invalid_config_repair"
+  | "rewrite_invalid_config_normalized";
 
 export interface DoctorAction {
   id: DoctorActionId;
@@ -555,10 +557,35 @@ function hasLeafModelProblem(report: DoctorReport) {
   return report.checks.some((entry) => entry.name === "leaf_model" && entry.status !== "ok");
 }
 
+function hasInvalidConfigProblem(report: DoctorReport) {
+  return report.checks.some((entry) => entry.name === "config" && entry.status === "error");
+}
+
 export function buildDoctorActionMenu(report: DoctorReport): DoctorActionMenu {
-  const recommendModelSelection = hasLeafModelProblem(report);
+  const invalidConfigProblem = hasInvalidConfigProblem(report);
+  const recommendModelSelection = hasLeafModelProblem(report) && !invalidConfigProblem;
   const recommendKeepCurrent = report.ok && !recommendModelSelection;
   const actions: DoctorAction[] = [
+    ...(invalidConfigProblem
+      ? [
+          {
+            description:
+              "Cancel invalid config repair and leave the Tool Configuration File untouched.",
+            id: "cancel_invalid_config_repair" as const,
+            label: "Cancel invalid config repair",
+            recommended: true,
+            safeDefault: true,
+          },
+          {
+            description:
+              "After explicit confirmation, create or preserve a backup and replace invalid config with a normalized Transparent Sparse Config Scaffold.",
+            id: "rewrite_invalid_config_normalized" as const,
+            label: "Confirmed normalized rewrite of invalid config",
+            recommended: false,
+            safeDefault: false,
+          },
+        ]
+      : []),
     {
       description:
         "Start Formal Leaf Model Selection. This Doctor Repair Flow is available after every diagnostic run, including passing runs.",
@@ -590,16 +617,23 @@ export function buildDoctorActionMenu(report: DoctorReport): DoctorActionMenu {
       safeDefault: false,
     },
   ];
-  return {
-    actions,
-    defaultActionId: recommendModelSelection
-      ? "select_formal_leaf_model"
-      : "keep_current_configuration",
-  };
+  let defaultActionId: DoctorActionId = "keep_current_configuration";
+  if (invalidConfigProblem) {
+    defaultActionId = "cancel_invalid_config_repair";
+  } else if (recommendModelSelection) {
+    defaultActionId = "select_formal_leaf_model";
+  }
+  return { actions, defaultActionId };
 }
 
 function diagnosticLine(checkEntry: DoctorCheck) {
-  return `- [${checkEntry.status}] ${checkEntry.name}: ${checkEntry.message}`;
+  const details = checkEntry.details ?? {};
+  const field = typeof details.field === "string" ? details.field : undefined;
+  const code = typeof details.code === "string" ? details.code : undefined;
+  const detailSuffix = [code ? `code=${code}` : undefined, field ? `field=${field}` : undefined]
+    .filter(Boolean)
+    .join(", ");
+  return `- [${checkEntry.status}] ${checkEntry.name}: ${checkEntry.message}${detailSuffix ? ` (${detailSuffix})` : ""}`;
 }
 
 function manualRemediationSnippets(report: DoctorReport) {
