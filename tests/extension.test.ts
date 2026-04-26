@@ -48,6 +48,10 @@ interface RegisteredCommand {
     handler: (context: {
       cwd: string;
       leafProcessRunner?: (invocation: ProcessInvocation) => ProcessResult | Promise<ProcessResult>;
+      modelRegistry?: {
+        registeredModels?: unknown[];
+        scopedModelPatterns?: string[];
+      };
       ui?: {
         notify?: (message: string) => void | Promise<void>;
         promptText?: (prompt: string) => string | Promise<string>;
@@ -478,6 +482,170 @@ describe("lambda_rlm Pi extension registration", () => {
     await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
       '# model = "<provider>/<model-id>"',
     );
+  });
+
+  it("uses a scoped-model-aware Formal Leaf model picker before writing the selected model", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-scoped-picker-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      modelRegistry: {
+        registeredModels: [
+          { credentialReady: true, id: "google/gemini" },
+          { credentialReady: true, id: "anthropic/claude" },
+        ],
+        scopedModelPatterns: ["anthropic/claude"],
+      },
+      ui: {
+        promptText: () => {
+          throw new Error("manual entry should not be needed for a selected candidate");
+        },
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return selections.length === 1 ? "select_formal_leaf_model" : "anthropic/claude";
+        },
+      },
+    });
+
+    expect(selections[1]).toContain("Candidate Leaf Model Set");
+    expect(selections[1]).toContain(":anthropic/claude:");
+    expect(selections[1]).toContain("anthropic/claude,google/gemini");
+    expect(selections[1]).toContain("__manual_formal_leaf_model__");
+    expect(selections[1]).toContain("__show_all_registered_formal_leaf_models__");
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'model = "anthropic/claude"',
+    );
+    expect(result.details).toMatchObject({ modelWrite: { model: "anthropic/claude" } });
+  });
+
+  it("lets a secondary picker action show all registered models and warns for missing-auth selections", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-expanded-picker-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const notifications: string[] = [];
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      modelRegistry: {
+        registeredModels: [
+          { credentialReady: true, id: "google/gemini" },
+          { credentialReady: false, id: "local/qwen" },
+        ],
+      },
+      ui: {
+        notify: (message) => {
+          notifications.push(message);
+        },
+        promptText: () => "unused/manual",
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          if (selections.length === 1) {
+            return "select_formal_leaf_model";
+          }
+          if (selections.length === 2) {
+            return "__show_all_registered_formal_leaf_models__";
+          }
+          return "local/qwen";
+        },
+      },
+    });
+
+    expect(selections[2]).toContain("all registered models");
+    expect(selections[2]).toContain("local/qwen");
+    expect(notifications).toContainEqual(expect.stringContaining("Missing auth"));
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'model = "local/qwen"',
+    );
+    expect(result.details).toMatchObject({ modelWrite: { model: "local/qwen" } });
+  });
+
+  it("shows next actions instead of an empty picker when no credential-ready models exist", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-no-ready-picker-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const notifications: string[] = [];
+    const selections: string[] = [];
+    const prompts: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      modelRegistry: {
+        registeredModels: [{ credentialReady: false, id: "local/qwen" }],
+        scopedModelPatterns: ["local/qwen"],
+      },
+      ui: {
+        notify: (message) => {
+          notifications.push(message);
+        },
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "manual/provider";
+        },
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return selections.length === 1
+            ? "select_formal_leaf_model"
+            : "__manual_formal_leaf_model__";
+        },
+      },
+    });
+
+    expect(notifications).toContainEqual(expect.stringContaining("No credential-ready models"));
+    expect(notifications).toContainEqual(expect.stringContaining("/login"));
+    expect(selections[1]).toContain("__manual_formal_leaf_model__");
+    expect(prompts).toContainEqual(expect.stringContaining("manual Formal Leaf model"));
+    expect(result.details).toMatchObject({ modelWrite: { model: "manual/provider" } });
+  });
+
+  it("routes an available-but-empty registry through no-ready model guidance before manual entry", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-empty-registry-picker-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const notifications: string[] = [];
+    const selections: string[] = [];
+    const prompts: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      modelRegistry: { registeredModels: [] },
+      ui: {
+        notify: (message) => {
+          notifications.push(message);
+        },
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "manual/provider";
+        },
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return selections.length === 1
+            ? "select_formal_leaf_model"
+            : "__manual_formal_leaf_model__";
+        },
+      },
+    });
+
+    expect(notifications).toContainEqual(expect.stringContaining("No credential-ready models"));
+    expect(selections[1]).toContain("Candidate Leaf Model Set");
+    expect(selections[1]).toContain("__manual_formal_leaf_model__");
+    expect(prompts).toContainEqual(expect.stringContaining("manual Formal Leaf model"));
+    expect(result.details).toMatchObject({ modelWrite: { model: "manual/provider" } });
   });
 
   it("supports in-flow manual Formal Leaf model entry, writes the global config by default, and reruns diagnostics", async () => {
