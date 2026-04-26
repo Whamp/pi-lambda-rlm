@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { MANUAL_MODEL_ENTRY_ID, resolveCandidateLeafModelSet } from "../src/model-candidates.js";
+import {
+  MANUAL_MODEL_ENTRY_ID,
+  candidateLeafModelInputFromRegistry,
+  resolveCandidateLeafModelSet,
+} from "../src/model-candidates.js";
 
 const models = [
   { id: "google/gemini", credentialReady: true },
@@ -81,5 +85,30 @@ describe("Candidate Leaf Model Set resolver", () => {
     ]);
     expect(set.noReadyModelsMessage).toContain("No credential-ready models");
     expect(set.noReadyModelsMessage).toContain("/login");
+  });
+
+  it("resolves string-listed registry models through find before checking configured auth", () => {
+    const foundModel = { id: "gpt-4o-mini", provider: "openai" };
+    const checkedModels: unknown[] = [];
+
+    const input = candidateLeafModelInputFromRegistry({
+      registeredModels: ["openai/gpt-4o-mini"],
+      find: (provider, modelId) => {
+        expect({ modelId, provider }).toStrictEqual({
+          modelId: "gpt-4o-mini",
+          provider: "openai",
+        });
+        return foundModel;
+      },
+      hasConfiguredAuth: (model) => {
+        checkedModels.push(model);
+        return model === foundModel;
+      },
+    });
+
+    expect(checkedModels).toStrictEqual([foundModel]);
+    expect(input.registeredModels).toStrictEqual([
+      { credentialReady: true, id: "openai/gpt-4o-mini" },
+    ]);
   });
 });

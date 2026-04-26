@@ -210,11 +210,11 @@ async function selectExpandedCandidate(args: {
 }
 
 async function chooseFormalLeafModel(ctx: MinimalCommandContext) {
-  const registryInput = candidateLeafModelInputFromRegistry(ctx.modelRegistry);
-  if (registryInput.registeredModels.length === 0) {
+  if (!ctx.modelRegistry) {
     return promptManualFormalLeafModel(ctx);
   }
 
+  const registryInput = candidateLeafModelInputFromRegistry(ctx.modelRegistry);
   const candidateSet = resolveCandidateLeafModelSet(registryInput);
   if (candidateSet.noReadyModelsMessage) {
     await ctx.ui?.notify?.(candidateSet.noReadyModelsMessage);

@@ -110,7 +110,15 @@ function modelId(value: unknown): string | undefined {
   return provider && id ? `${provider}/${id}` : direct;
 }
 
-function modelCredentialReady(value: unknown, registry?: ModelRegistryLike) {
+function splitProviderModel(modelPattern: string) {
+  const slash = modelPattern.indexOf("/");
+  if (slash <= 0 || slash === modelPattern.length - 1) {
+    return;
+  }
+  return { modelId: modelPattern.slice(slash + 1), provider: modelPattern.slice(0, slash) };
+}
+
+function explicitCredentialReady(value: unknown) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
     for (const key of ["credentialReady", "hasAuth", "authReady", "ready", "available"]) {
@@ -119,7 +127,20 @@ function modelCredentialReady(value: unknown, registry?: ModelRegistryLike) {
       }
     }
   }
-  return registry?.hasConfiguredAuth ? registry.hasConfiguredAuth(value) : false;
+}
+
+function modelCredentialReady(value: unknown, id: string, registry?: ModelRegistryLike) {
+  const explicitReady = explicitCredentialReady(value);
+  if (typeof explicitReady === "boolean") {
+    return explicitReady;
+  }
+  if (!registry?.hasConfiguredAuth) {
+    return false;
+  }
+  const parsed = splitProviderModel(id);
+  const findModel = registry.find?.bind(registry);
+  const model = parsed && findModel ? findModel(parsed.provider, parsed.modelId) : value;
+  return model ? registry.hasConfiguredAuth(model) : false;
 }
 
 function firstArray(...values: unknown[]) {
@@ -151,7 +172,7 @@ export function candidateLeafModelInputFromRegistry(
       return id
         ? [
             {
-              credentialReady: modelCredentialReady(value, registry),
+              credentialReady: modelCredentialReady(value, id, registry),
               id,
             },
           ]

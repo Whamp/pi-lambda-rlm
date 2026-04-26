@@ -610,6 +610,44 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(result.details).toMatchObject({ modelWrite: { model: "manual/provider" } });
   });
 
+  it("routes an available-but-empty registry through no-ready model guidance before manual entry", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-empty-registry-picker-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const notifications: string[] = [];
+    const selections: string[] = [];
+    const prompts: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      modelRegistry: { registeredModels: [] },
+      ui: {
+        notify: (message) => {
+          notifications.push(message);
+        },
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "manual/provider";
+        },
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return selections.length === 1
+            ? "select_formal_leaf_model"
+            : "__manual_formal_leaf_model__";
+        },
+      },
+    });
+
+    expect(notifications).toContainEqual(expect.stringContaining("No credential-ready models"));
+    expect(selections[1]).toContain("Candidate Leaf Model Set");
+    expect(selections[1]).toContain("__manual_formal_leaf_model__");
+    expect(prompts).toContainEqual(expect.stringContaining("manual Formal Leaf model"));
+    expect(result.details).toMatchObject({ modelWrite: { model: "manual/provider" } });
+  });
+
   it("supports in-flow manual Formal Leaf model entry, writes the global config by default, and reruns diagnostics", async () => {
     const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-model-flow-"));
     const workspacePath = join(root, ".pi", "lambda-rlm");
