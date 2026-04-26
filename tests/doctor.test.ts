@@ -506,6 +506,7 @@ describe("lambda_rlm doctor diagnostics", () => {
       "select_formal_leaf_model",
       "keep_current_configuration",
       "change_formal_leaf_thinking",
+      "run_real_formal_leaf_smoke_test",
       "show_config_paths",
     ]);
     expect(menu.defaultActionId).toBe("select_formal_leaf_model");
@@ -599,5 +600,38 @@ describe("lambda_rlm doctor diagnostics", () => {
     );
     expect(output).toContain("keep_current_configuration (recommended, safe default)");
     expect(output).toContain("select_formal_leaf_model");
+  });
+
+  it("offers an explicit real Formal Leaf smoke test action without making it the default readiness path", async () => {
+    const root = await tempDir();
+    const projectConfigPath = await writeLeafConfig(root);
+    const piInvocations: string[] = [];
+    const report = await runLambdaRlmDoctor({
+      cwd: root,
+      mockBridgeRunner: () => ({ ok: true, message: "mock bridge ok" }),
+      processRunner: (invocation) => {
+        if (invocation.command === "pi" && !invocation.args.includes("--version")) {
+          piInvocations.push(invocation.args.join(" "));
+        }
+        return okRunner(invocation);
+      },
+      projectConfigPath,
+    });
+
+    const menu = buildDoctorActionMenu(report);
+    const output = renderDoctorCommandOutput(report, { interactive: true });
+
+    expect(piInvocations).toStrictEqual([]);
+    expect(menu.defaultActionId).toBe("keep_current_configuration");
+    expect(menu.actions).toContainEqual(
+      expect.objectContaining({
+        id: "run_real_formal_leaf_smoke_test",
+        label: expect.stringContaining("real Formal Leaf smoke test"),
+        recommended: false,
+        safeDefault: false,
+      }),
+    );
+    expect(output).toContain("run_real_formal_leaf_smoke_test");
+    expect(output).toContain("may spend model credits or rate limits");
   });
 });
