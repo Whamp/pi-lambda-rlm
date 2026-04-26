@@ -4,6 +4,13 @@ import { executeLambdaRlmTool, LambdaRlmValidationError } from "./lambda-rlm-too
 import { buildDoctorActionMenu, renderDoctorCommandOutput, runLambdaRlmDoctor } from "./doctor.js";
 import { resolveLambdaRlmConfigWithSources } from "./config-resolver.js";
 import type { DoctorOptions } from "./doctor.js";
+import {
+  MANUAL_MODEL_ENTRY_ID,
+  SHOW_ALL_REGISTERED_MODELS_ID,
+  candidateLeafModelInputFromRegistry,
+  resolveCandidateLeafModelSet,
+} from "./model-candidates.js";
+import type { CandidateLeafModel } from "./model-candidates.js";
 import { writeFormalLeafModelSelection } from "./targeted-config-edit.js";
 import { ensureLambdaRlmUserWorkspace } from "./workspace-scaffolding.js";
 import type { ProcessRunner } from "./leaf-runner.js";
@@ -84,7 +91,7 @@ interface ToolUpdate {
 interface MinimalCommandContext {
   cwd?: string;
   leafProcessRunner?: ProcessRunner;
-  modelRegistry?: {
+  modelRegistry?: Parameters<typeof candidateLeafModelInputFromRegistry>[0] & {
     find?: (provider: string, modelId: string) => unknown;
     hasConfiguredAuth?: (model: unknown) => boolean;
   };
@@ -176,6 +183,69 @@ async function selectModelWriteTarget(args: {
   ) as Promise<ConfigWriteTarget>;
 }
 
+function modelChoice(candidate: CandidateLeafModel) {
+  return {
+    id: candidate.id,
+    label: candidate.label,
+    ...(candidate.warning ? { description: candidate.warning } : {}),
+  };
+}
+
+function promptManualFormalLeafModel(ctx: MinimalCommandContext) {
+  return ctx.ui?.promptText?.(
+    "Enter a manual Formal Leaf model pattern for Formal Leaf Model Selection (for example provider/model-id).",
+  );
+}
+
+async function selectExpandedCandidate(args: {
+  ctx: MinimalCommandContext;
+  candidates: CandidateLeafModel[];
+}) {
+  const expandedChoice = await args.ctx.ui?.select?.(
+    "Choose from all registered models for Formal Leaf Model Selection. Missing-auth models are labeled and may still fail doctor until credentials are configured.",
+    args.candidates.map(modelChoice),
+    args.candidates[0]?.id ?? MANUAL_MODEL_ENTRY_ID,
+  );
+  return args.candidates.find((candidate) => candidate.id === expandedChoice);
+}
+
+async function chooseFormalLeafModel(ctx: MinimalCommandContext) {
+  const registryInput = candidateLeafModelInputFromRegistry(ctx.modelRegistry);
+  if (registryInput.registeredModels.length === 0) {
+    return promptManualFormalLeafModel(ctx);
+  }
+
+  const candidateSet = resolveCandidateLeafModelSet(registryInput);
+  if (candidateSet.noReadyModelsMessage) {
+    await ctx.ui?.notify?.(candidateSet.noReadyModelsMessage);
+  }
+  const selectedDefault = await ctx.ui?.select?.(
+    "Choose a Candidate Leaf Model Set entry for Formal Leaf Model Selection.",
+    [
+      ...candidateSet.defaultCandidates.map(modelChoice),
+      {
+        description: "Secondary action: show all registered models, including missing-auth models.",
+        id: SHOW_ALL_REGISTERED_MODELS_ID,
+        label: "Show all registered models",
+      },
+    ],
+    candidateSet.defaultCandidates[0]?.id ?? MANUAL_MODEL_ENTRY_ID,
+  );
+  const selectedModel =
+    selectedDefault === SHOW_ALL_REGISTERED_MODELS_ID
+      ? await selectExpandedCandidate({ candidates: candidateSet.expandedCandidates, ctx })
+      : candidateSet.defaultCandidates.find((candidate) => candidate.id === selectedDefault);
+  if (selectedModel?.id === MANUAL_MODEL_ENTRY_ID) {
+    return promptManualFormalLeafModel(ctx);
+  }
+  if (selectedModel?.warning) {
+    await ctx.ui?.notify?.(
+      `${selectedModel.warning} Selected missing-auth model: ${selectedModel.id}.`,
+    );
+  }
+  return selectedModel?.id;
+}
+
 async function maybeRunInteractiveModelSelection(args: {
   ctx: MinimalCommandContext;
   doctorOptions: DoctorOptions;
@@ -213,10 +283,8 @@ async function maybeRunInteractiveModelSelection(args: {
       },
     };
   }
-  const model = await args.ctx.ui.promptText(
-    "Enter a manual Formal Leaf model pattern for Formal Leaf Model Selection (for example provider/model-id).",
-  );
-  if (!model.trim()) {
+  const model = await chooseFormalLeafModel(args.ctx);
+  if (!model?.trim()) {
     return;
   }
 
