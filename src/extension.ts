@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { executeLambdaRlmTool, LambdaRlmValidationError } from "./lambda-rlm-tool.js";
-import { runLambdaRlmDoctor } from "./doctor.js";
+import { buildDoctorActionMenu, renderDoctorCommandOutput, runLambdaRlmDoctor } from "./doctor.js";
 import { ensureLambdaRlmUserWorkspace } from "./workspace-scaffolding.js";
 import type { ProcessRunner } from "./leaf-runner.js";
 import type { ModelCallConcurrencyQueue } from "./model-call-queue.js";
@@ -138,11 +138,17 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
         ...(ctx.modelRegistry ? { modelRegistry: ctx.modelRegistry } : {}),
         ...(pi.lambdaRlmWorkspacePath ? { workspacePath: pi.lambdaRlmWorkspacePath } : {}),
       });
-      const summary = `lambda_rlm doctor ${report.ok ? "passed" : "found errors"}: ${report.checks.filter((entry) => entry.status === "error").length} error(s), ${report.checks.filter((entry) => entry.status === "warn").length} warning(s).`;
-      await ctx.ui?.notify?.(summary);
+      const interactive = Boolean(ctx.ui);
+      const text = renderDoctorCommandOutput(report, { interactive });
+      await ctx.ui?.notify?.(text.split("\n", 1)[0] ?? text);
       return {
-        content: [{ text: summary, type: "text" }],
-        details: report,
+        content: [{ text, type: "text" }],
+        details: {
+          ...report,
+          ...(interactive
+            ? { actions: buildDoctorActionMenu(report) }
+            : { mode: "diagnostic-only" }),
+        },
       };
     },
   });

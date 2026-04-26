@@ -430,9 +430,30 @@ describe("lambda_rlm Pi extension registration", () => {
 
     const text = firstContentText(result);
     expect(text).toMatch(/lambda_rlm doctor (passed|found errors)/);
-    const details = result.details as { checks: { name: string }[] };
+    expect(text).toContain("Diagnostics:");
+    expect(text).toContain("Post-diagnostics action menu");
+    const details = result.details as { actions: unknown; checks: { name: string }[] };
     expect(details.checks.map((check) => check.name)).toContain("mock_bridge");
-    expect(notifications).toStrictEqual([text]);
+    expect(details.actions).toBeTruthy();
+    expect(notifications).toStrictEqual([text.split("\n", 1)[0]]);
+  });
+
+  it("runs non-interactive doctor as diagnostic-only output without UI prompts or repair-flow actions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-noninteractive-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+
+    const result = await command.options.handler({ cwd: root });
+
+    const text = firstContentText(result);
+    expect(text).toContain("Diagnostic-Only Doctor Mode");
+    expect(text).not.toContain("Post-diagnostics action menu");
+    expect(text).toContain('[leaf]\nmodel = "<provider>/<model-id>"');
+    expect(result.details).toMatchObject({ mode: "diagnostic-only" });
+    expect(result.details).not.toHaveProperty("actions");
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      '# model = "<provider>/<model-id>"',
+    );
   });
 
   it("loads the Pi extension entrypoint and registers the lambda_rlm tool", () => {
