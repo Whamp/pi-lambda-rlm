@@ -34,6 +34,16 @@ Intentional local patches:
    `promptKey`, `taskType`, and `composeOp`.
 5. `LambdaRLM.completion()` includes metadata documenting this patch boundary.
 
+## Issue #13: compact progress telemetry seam
+
+1. `LambdaRLM.__init__(..., progress_callback=...)` accepts an optional callback
+   for source-free run telemetry.
+2. `LambdaRLM.completion()` emits a deterministic `planned` progress payload after
+   task detection and pure planning, before Φ execution starts.
+3. The bridge converts progress callbacks into protocol `run_progress` messages;
+   payloads contain compact plan numbers and enum values, not source text or
+   prompt bodies.
+
 Do not replace the real `LocalREPL`/`LMHandler` Lambda-RLM execution path with a
 simplified direct recursive executor. Tests under `tests/python/` assert that
 filter, leaf, and reducer calls flow through `LocalREPL`/`LMHandler`.

@@ -203,7 +203,20 @@ def main() -> int:
         prompt, question, context_window, prompt_registry = bridge_request_to_prompt(request)
         log(f"bridge: received real Lambda-RLM run request {run_id}")
         client = CallbackBaseLM(run_id)
-        result = LambdaRLM(client=client, query=question, context_window_chars=context_window, prompt_registry=prompt_registry).completion(prompt)
+
+        def progress_callback(payload: dict[str, Any]) -> None:
+            message = dict(payload)
+            message["type"] = "run_progress"
+            message["runId"] = run_id
+            emit_stdout(message)
+
+        result = LambdaRLM(
+            client=client,
+            query=question,
+            context_window_chars=context_window,
+            prompt_registry=prompt_registry,
+            progress_callback=progress_callback,
+        ).completion(prompt)
         emit_stdout(
             {
                 "type": "run_result",

@@ -38,6 +38,12 @@ export const LambdaRlmToolParameters = Type.Object(
           "Ordered paths to readable UTF-8 text files for one consolidated Lambda-RLM run. Pass exactly one of contextPath or contextPaths; do not inline, paste, or concatenate file contents yourself.",
       }),
     ),
+    debug: Type.Optional(
+      Type.Boolean({
+        description:
+          "Advanced diagnostics mode. When true, writes a compact source-free run timeline and telemetry artifact to disk for debugging successes, failures, and timeouts. Omit during normal use.",
+      }),
+    ),
     maxInputBytes: Type.Optional(
       Type.Number({
         minimum: 1,
@@ -103,13 +109,17 @@ interface MinimalCommandContext {
     hasConfiguredAuth?: (model: unknown) => boolean;
   };
   ui?: {
-    notify?: (message: string) => void | Promise<void>;
-    promptText?: (prompt: string) => string | Promise<string>;
+    input?: (
+      prompt: string,
+      placeholder?: string,
+    ) => string | undefined | Promise<string | undefined>;
+    notify?: (message: string, type?: "info" | "warning" | "error") => void | Promise<void>;
+    /** Legacy test/development shim kept for older harnesses; Pi's real API is input(). */
+    promptText?: (prompt: string) => string | undefined | Promise<string | undefined>;
     select?: (
       prompt: string,
-      choices: { id: string; label: string; description?: string; recommended?: boolean }[],
-      defaultChoiceId?: string,
-    ) => string | Promise<string>;
+      choices: string[],
+    ) => string | undefined | Promise<string | undefined>;
   };
 }
 interface MinimalPiApi {
@@ -154,6 +164,113 @@ function defaultProjectConfigPath(cwd: string) {
 
 type ConfigWriteTarget = "global" | "project";
 
+interface UiChoice {
+  id: string;
+  label: string;
+  description?: string;
+  recommended?: boolean;
+  safeDefault?: boolean;
+}
+
+function displayChoice(choice: UiChoice) {
+  const badges = [
+    choice.recommended ? "recommended" : undefined,
+    choice.safeDefault ? "safe default" : undefined,
+  ].filter(Boolean);
+  return [
+    `${choice.label} [${choice.id}]${badges.length > 0 ? ` (${badges.join(", ")})` : ""}`,
+    choice.description,
+  ]
+    .filter(Boolean)
+    .join(" — ");
+}
+
+function orderedChoices(choices: UiChoice[], defaultChoiceId?: string) {
+  if (!defaultChoiceId) {
+    return choices;
+  }
+  const defaultChoice = choices.find((choice) => choice.id === defaultChoiceId);
+  if (!defaultChoice) {
+    return choices;
+  }
+  return [defaultChoice, ...choices.filter((choice) => choice.id !== defaultChoiceId)];
+}
+
+async function selectChoiceId(args: {
+  ctx: MinimalCommandContext;
+  prompt: string;
+  choices: UiChoice[];
+  defaultChoiceId?: string;
+}) {
+  const { ui } = args.ctx;
+  if (!ui?.select) {
+    return;
+  }
+  const choices = orderedChoices(args.choices, args.defaultChoiceId);
+  const defaultChoice = choices.find((choice) => choice.id === args.defaultChoiceId);
+  const prompt = defaultChoice
+    ? `${args.prompt}\nDefault: ${defaultChoice.label} [${defaultChoice.id}]`
+    : args.prompt;
+  const renderedChoices = choices.map(displayChoice);
+  const renderedToId = new Map<string, string>();
+  for (let index = 0; index < renderedChoices.length; index += 1) {
+    const rendered = renderedChoices[index];
+    const id = choices[index]?.id;
+    if (rendered && id) {
+      renderedToId.set(rendered, id);
+    }
+  }
+  const selected = await ui.select(prompt, renderedChoices);
+  if (!selected) {
+    return;
+  }
+  if (choices.some((choice) => choice.id === selected)) {
+    return selected;
+  }
+  return renderedToId.get(selected);
+}
+
+function diagnosticPromptSummary(initialText: string) {
+  const lines = initialText.split(/\r?\n/);
+  const summary = lines[0] ?? "lambda_rlm doctor completed.";
+  const diagnosticsStart = lines.indexOf("Diagnostics:");
+  const menuStart = lines.indexOf("Post-diagnostics action menu (Doctor Repair Flow):");
+  let diagnosticLines: string[] = [];
+  if (diagnosticsStart === -1) {
+    diagnosticLines = [];
+  } else if (menuStart === -1) {
+    diagnosticLines = lines.slice(diagnosticsStart + 1);
+  } else {
+    diagnosticLines = lines.slice(diagnosticsStart + 1, menuStart);
+  }
+  const problemLines = diagnosticLines.filter(
+    (line) => line.startsWith("- [error]") || line.startsWith("- [warn]"),
+  );
+  if (problemLines.length === 0) {
+    return `${summary}\nDiagnostics passed.`;
+  }
+  return [summary, "Problems:", ...problemLines].join("\n");
+}
+
+function doctorRepairPrompt(initialText: string, actionPrompt: string) {
+  return `${diagnosticPromptSummary(initialText)}\n\n${actionPrompt}`;
+}
+
+function promptUserText(ctx: MinimalCommandContext, prompt: string, placeholder?: string) {
+  if (ctx.ui?.promptText) {
+    return ctx.ui.promptText(prompt);
+  }
+  return ctx.ui?.input?.(prompt, placeholder);
+}
+
+async function notifyUser(
+  ctx: MinimalCommandContext,
+  message: string,
+  type: "info" | "warning" | "error" = "info",
+) {
+  await ctx.ui?.notify?.(message, type);
+}
+
 async function selectConfigWriteTarget(args: {
   ctx: MinimalCommandContext;
   doctorOptions: DoctorOptions;
@@ -173,9 +290,8 @@ async function selectConfigWriteTarget(args: {
   }
   const highlightedTarget =
     targetState.config.sources.leaf[args.effectiveSource] === "project" ? "project" : "global";
-  return args.ctx.ui?.select?.(
-    `Choose the Configuration Write Target for ${args.selectionLabel}.`,
-    [
+  return selectChoiceId({
+    choices: [
       {
         id: "global",
         label: "Global Tool Configuration",
@@ -188,11 +304,13 @@ async function selectConfigWriteTarget(args: {
           "Write this project's .pi/lambda-rlm/config.toml inside the Project Trust Boundary; global config remains unchanged.",
       },
     ],
-    highlightedTarget,
-  ) as Promise<ConfigWriteTarget>;
+    ctx: args.ctx,
+    defaultChoiceId: highlightedTarget,
+    prompt: `Choose the Configuration Write Target for ${args.selectionLabel}.`,
+  }) as Promise<ConfigWriteTarget | undefined>;
 }
 
-function modelChoice(candidate: CandidateLeafModel) {
+function modelChoice(candidate: CandidateLeafModel): UiChoice {
   return {
     id: candidate.id,
     label: candidate.label,
@@ -201,8 +319,10 @@ function modelChoice(candidate: CandidateLeafModel) {
 }
 
 function promptManualFormalLeafModel(ctx: MinimalCommandContext) {
-  return ctx.ui?.promptText?.(
+  return promptUserText(
+    ctx,
     "Enter a manual Formal Leaf model pattern for Formal Leaf Model Selection (for example provider/model-id).",
+    "provider/model-id",
   );
 }
 
@@ -210,15 +330,17 @@ async function selectExpandedCandidate(args: {
   ctx: MinimalCommandContext;
   candidates: CandidateLeafModel[];
 }) {
-  const expandedChoice = await args.ctx.ui?.select?.(
-    "Choose from all registered models for Formal Leaf Model Selection. Missing-auth models are labeled and may still fail doctor until credentials are configured.",
-    args.candidates.map(modelChoice),
-    args.candidates[0]?.id ?? MANUAL_MODEL_ENTRY_ID,
-  );
+  const expandedChoice = await selectChoiceId({
+    choices: args.candidates.map(modelChoice),
+    ctx: args.ctx,
+    defaultChoiceId: args.candidates[0]?.id ?? MANUAL_MODEL_ENTRY_ID,
+    prompt:
+      "Choose from all registered models for Formal Leaf Model Selection. Missing-auth models are labeled and may still fail doctor until credentials are configured.",
+  });
   return args.candidates.find((candidate) => candidate.id === expandedChoice);
 }
 
-function thinkingChoice(thinking: LeafThinking) {
+function thinkingChoice(thinking: LeafThinking): UiChoice {
   return {
     id: thinking,
     label: thinking,
@@ -230,11 +352,12 @@ function thinkingChoice(thinking: LeafThinking) {
 }
 
 async function chooseFormalLeafThinking(ctx: MinimalCommandContext) {
-  const selected = await ctx.ui?.select?.(
-    "Choose a supported value for Formal Leaf Thinking Selection.",
-    LEAF_THINKING_VALUES.map(thinkingChoice),
-    "off",
-  );
+  const selected = await selectChoiceId({
+    choices: LEAF_THINKING_VALUES.map(thinkingChoice),
+    ctx,
+    defaultChoiceId: "off",
+    prompt: "Choose a supported value for Formal Leaf Thinking Selection.",
+  });
   return LEAF_THINKING_VALUES.find((value) => value === selected);
 }
 
@@ -246,11 +369,10 @@ async function chooseFormalLeafModel(ctx: MinimalCommandContext) {
   const registryInput = candidateLeafModelInputFromRegistry(ctx.modelRegistry);
   const candidateSet = resolveCandidateLeafModelSet(registryInput);
   if (candidateSet.noReadyModelsMessage) {
-    await ctx.ui?.notify?.(candidateSet.noReadyModelsMessage);
+    await notifyUser(ctx, candidateSet.noReadyModelsMessage, "warning");
   }
-  const selectedDefault = await ctx.ui?.select?.(
-    "Choose a Candidate Leaf Model Set entry for Formal Leaf Model Selection.",
-    [
+  const selectedDefault = await selectChoiceId({
+    choices: [
       ...candidateSet.defaultCandidates.map(modelChoice),
       {
         description: "Secondary action: show all registered models, including missing-auth models.",
@@ -258,8 +380,10 @@ async function chooseFormalLeafModel(ctx: MinimalCommandContext) {
         label: "Show all registered models",
       },
     ],
-    candidateSet.defaultCandidates[0]?.id ?? MANUAL_MODEL_ENTRY_ID,
-  );
+    ctx,
+    defaultChoiceId: candidateSet.defaultCandidates[0]?.id ?? MANUAL_MODEL_ENTRY_ID,
+    prompt: "Choose a Candidate Leaf Model Set entry for Formal Leaf Model Selection.",
+  });
   const selectedModel =
     selectedDefault === SHOW_ALL_REGISTERED_MODELS_ID
       ? await selectExpandedCandidate({ candidates: candidateSet.expandedCandidates, ctx })
@@ -268,8 +392,10 @@ async function chooseFormalLeafModel(ctx: MinimalCommandContext) {
     return promptManualFormalLeafModel(ctx);
   }
   if (selectedModel?.warning) {
-    await ctx.ui?.notify?.(
+    await notifyUser(
+      ctx,
       `${selectedModel.warning} Selected missing-auth model: ${selectedModel.id}.`,
+      "warning",
     );
   }
   return selectedModel?.id;
@@ -286,7 +412,7 @@ interface InteractiveRepairArgs {
 
 async function cancelInvalidConfigRepair(args: InteractiveRepairArgs) {
   const combinedText = `${args.initialText}\n\nInvalid config repair was cancelled. No normalized rewrite occurred and the Tool Configuration File was left untouched.`;
-  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  await notifyUser(args.ctx, combinedText, "warning");
   return {
     content: [{ text: combinedText, type: "text" }],
     details: {
@@ -328,8 +454,10 @@ async function rewriteInvalidConfig(args: InteractiveRepairArgs) {
   const details = invalidConfigDetails(args.report);
   const rewriteTarget = details.path ?? globalConfigPath;
   const detailsText = invalidConfigDetailsText(args.report);
-  const confirmation = await args.ctx.ui?.promptText?.(
+  const confirmation = await promptUserText(
+    args.ctx,
     `Type REWRITE to confirm normalized rewrite of invalid config at ${rewriteTarget}${detailsText ? ` (${detailsText})` : ""}. A backup will be created before replacement.`,
+    "REWRITE",
   );
   const rewrite = await normalizeRewriteInvalidConfig({
     configPath: rewriteTarget,
@@ -338,7 +466,7 @@ async function rewriteInvalidConfig(args: InteractiveRepairArgs) {
   const combinedText = rewrite.rewritten
     ? `${args.initialText}\n\nUser confirmed normalized rewrite. A backup was created at ${rewrite.backupPath} before replacing the Tool Configuration File with a normalized rewrite.`
     : `${args.initialText}\n\nNo normalized rewrite occurred because explicit user confirmation was not provided.`;
-  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  await notifyUser(args.ctx, combinedText, rewrite.rewritten ? "info" : "warning");
   return {
     content: [{ text: combinedText, type: "text" }],
     details: {
@@ -351,7 +479,7 @@ async function rewriteInvalidConfig(args: InteractiveRepairArgs) {
 
 async function blockUnsafeThinkingSelection(args: InteractiveRepairArgs) {
   const combinedText = `${args.initialText}\n\nFormal Leaf Thinking Selection was not started because initial diagnostics reported invalid Lambda-RLM configuration. Fix the TOML/config error first, then rerun /lambda-rlm-doctor.`;
-  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  await notifyUser(args.ctx, combinedText, "warning");
   return {
     content: [{ text: combinedText, type: "text" }],
     details: {
@@ -367,7 +495,7 @@ async function blockUnsafeThinkingSelection(args: InteractiveRepairArgs) {
 
 async function blockUnsafeModelSelection(args: InteractiveRepairArgs) {
   const combinedText = `${args.initialText}\n\nFormal Leaf Model Selection was not started because initial diagnostics reported invalid Lambda-RLM configuration. Fix the TOML/config error first, then rerun /lambda-rlm-doctor.`;
-  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  await notifyUser(args.ctx, combinedText, "warning");
   return {
     content: [{ text: combinedText, type: "text" }],
     details: {
@@ -383,7 +511,7 @@ async function blockUnsafeModelSelection(args: InteractiveRepairArgs) {
 
 async function blockUnsafeRealFormalLeafSmokeTest(args: InteractiveRepairArgs) {
   const combinedText = `${args.initialText}\n\nThe real Formal Leaf smoke test was not started because initial diagnostics reported invalid Lambda-RLM configuration. Fix the TOML/config error first, then rerun /lambda-rlm-doctor.`;
-  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  await notifyUser(args.ctx, combinedText, "warning");
   return {
     content: [{ text: combinedText, type: "text" }],
     details: {
@@ -424,7 +552,7 @@ async function runInteractiveThinkingSelection(args: InteractiveRepairArgs) {
   const targetLabel =
     selectedTarget === "project" ? "Project Tool Configuration" : "Global Tool Configuration";
   const combinedText = `${args.initialText}\n\nFormal Leaf Thinking Selection wrote ${thinkingWrite.thinking} to ${targetLabel} (${thinkingWrite.configPath}) using a Targeted Config Edit (${thinkingWrite.kind}); no automatic full diagnostic rerun was required for this thinking-only change.`;
-  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  await notifyUser(args.ctx, combinedText);
   return {
     content: [{ text: combinedText, type: "text" }],
     details: {
@@ -436,12 +564,14 @@ async function runInteractiveThinkingSelection(args: InteractiveRepairArgs) {
 }
 
 async function runInteractiveRealFormalLeafSmokeTest(args: InteractiveRepairArgs) {
-  const confirmation = await args.ctx.ui?.promptText?.(
+  const confirmation = await promptUserText(
+    args.ctx,
     "Run real Formal Leaf smoke test? This explicit action will start one Constrained Pi Leaf Call using the configured Formal Leaf model and current leaf command constraints. It may spend model credits or rate limits. Type RUN to continue, or anything else to cancel.",
+    "RUN",
   );
   if (confirmation !== "RUN") {
     const combinedText = `${args.initialText}\n\nThe real Formal Leaf smoke test was cancelled. No child Pi model call was started and Normal Doctor Command readiness semantics are unchanged.`;
-    await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+    await notifyUser(args.ctx, combinedText, "warning");
     return {
       content: [{ text: combinedText, type: "text" }],
       details: {
@@ -459,6 +589,7 @@ async function runInteractiveRealFormalLeafSmokeTest(args: InteractiveRepairArgs
   });
   if (!configResult.ok) {
     const combinedText = `${args.initialText}\n\nThe real Formal Leaf smoke test failed before starting because Lambda-RLM configuration could not be resolved. Fix config and rerun /lambda-rlm-doctor. Normal Doctor Command readiness semantics are unchanged.`;
+    await notifyUser(args.ctx, combinedText, "error");
     return {
       content: [{ text: combinedText, type: "text" }],
       details: {
@@ -475,6 +606,7 @@ async function runInteractiveRealFormalLeafSmokeTest(args: InteractiveRepairArgs
   const { leaf, run } = configResult.config.config;
   if (!leaf.model) {
     const combinedText = `${args.initialText}\n\nThe real Formal Leaf smoke test failed before starting because no Formal Leaf model is configured. Choose a Formal Leaf model first. Normal Doctor Command readiness semantics are unchanged.`;
+    await notifyUser(args.ctx, combinedText, "error");
     return {
       content: [{ text: combinedText, type: "text" }],
       details: {
@@ -503,7 +635,7 @@ async function runInteractiveRealFormalLeafSmokeTest(args: InteractiveRepairArgs
       },
     );
     const combinedText = `${args.initialText}\n\nThe real Formal Leaf smoke test succeeded using Formal Leaf model ${leaf.model}. Child Pi stdout: ${smoke.content || "<empty>"}. Normal Doctor Command readiness semantics are unchanged; this opt-in smoke test does not replace default doctor diagnostics.`;
-    await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+    await notifyUser(args.ctx, combinedText);
     return {
       content: [{ text: combinedText, type: "text" }],
       details: {
@@ -523,7 +655,7 @@ async function runInteractiveRealFormalLeafSmokeTest(args: InteractiveRepairArgs
         ? error.details
         : { error: { code: "unknown", message: String(error), type: "child_process" } };
     const combinedText = `${args.initialText}\n\nThe real Formal Leaf smoke test failed using Formal Leaf model ${leaf.model}. Normal Doctor Command readiness semantics are unchanged; default diagnostics remain based on the non-spending mock bridge check.`;
-    await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+    await notifyUser(args.ctx, combinedText, "error");
     return {
       content: [{ text: combinedText, type: "text" }],
       details: {
@@ -572,7 +704,7 @@ async function runInteractiveModelSelection(args: InteractiveRepairArgs) {
   });
   const rerunText = renderDoctorCommandOutput(rerun, { interactive: true });
   const combinedText = `${args.initialText}\n\nFormal Leaf Model Selection wrote ${modelWrite.model} to ${targetLabel} (${modelWrite.configPath}) using a Targeted Config Edit (${modelWrite.kind}).\n\nDiagnostics after Formal Leaf Model Selection write:\n${rerunText}`;
-  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  await notifyUser(args.ctx, combinedText, rerun.ok ? "info" : "error");
   return {
     content: [{ text: combinedText, type: "text" }],
     details: {
@@ -600,13 +732,17 @@ async function maybeRunInteractiveModelSelection(args: {
     (check) => check.name === "config" && check.status === "error",
   );
   const invalidConfigDetailsSummary = invalidConfigDetailsText(repairArgs.report);
-  const selectedAction = await args.ctx.ui.select(
-    initialConfigError
-      ? `Choose explicit repair choices for invalid config before any Doctor Repair Flow mutation${invalidConfigDetailsSummary ? ` (${invalidConfigDetailsSummary})` : ""}.`
-      : "Choose a Lambda-RLM Doctor Repair Flow action after diagnostics.",
-    args.menu.actions,
-    args.menu.defaultActionId,
-  );
+  const selectedAction = await selectChoiceId({
+    choices: args.menu.actions,
+    ctx: args.ctx,
+    defaultChoiceId: args.menu.defaultActionId,
+    prompt: doctorRepairPrompt(
+      args.initialText,
+      initialConfigError
+        ? `Choose explicit repair choices for invalid config before any Doctor Repair Flow mutation${invalidConfigDetailsSummary ? ` (${invalidConfigDetailsSummary})` : ""}.`
+        : "Choose a Lambda-RLM Doctor Repair Flow action after diagnostics.",
+    ),
+  });
   if (selectedAction === "cancel_invalid_config_repair") {
     return cancelInvalidConfigRepair(repairArgs);
   }
@@ -644,7 +780,7 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
     }
   }
 
-  pi.registerCommand?.("lambda-rlm-doctor", {
+  const doctorCommand = {
     description:
       "Runs non-destructive, workspace-ensuring Lambda-RLM MVP setup diagnostics for Python, config, prompts, fork seams, Pi leaf command shape, and mock bridge readiness.",
     async handler(...args: unknown[]) {
@@ -675,7 +811,7 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
         return modelSelectionResult;
       }
 
-      await ctx.ui?.notify?.(text.split("\n", 1)[0] ?? text);
+      await notifyUser(ctx, text, report.ok ? "info" : "error");
       return {
         content: [{ text, type: "text" }],
         details: {
@@ -684,7 +820,9 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
         },
       };
     },
-  });
+  };
+
+  pi.registerCommand?.("lambda-rlm-doctor", doctorCommand);
 
   pi.registerTool({
     description:
@@ -733,6 +871,7 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
     promptGuidelines: [
       "Use lambda_rlm when the task requires long-context reasoning over one or more readable text files by path, especially for answering questions, summarizing, extracting facts, synthesizing across files, analyzing, or diagnosing from context that would waste or overflow parent-agent context if read directly.",
       "Call lambda_rlm with exactly one of contextPath or contextPaths plus question. Pass paths to readable text files only; do not pass inline source text, raw prompts, pasted file contents, URLs, or directories directly. Convert or pack other sources into readable text files first.",
+      "Set debug only when explicitly investigating a Lambda-RLM success, failure, or timeout; debug mode writes compact source-free run telemetry to disk and should be omitted during normal use.",
       "Treat lambda_rlm as an Agent Context Avoidance boundary: it reads source files internally and returns a bounded answer rather than the source corpus.",
       "Expect a bounded answer plus compact run metadata. Do not ask lambda_rlm to return full source contents, large evidence packs, full execution traces, or citation dumps by default.",
       "If exact source verification is needed after lambda_rlm answers, use normal narrow follow-up tools such as read or rg on specific files or terms. Do not ask lambda_rlm to dump broad supporting context.",

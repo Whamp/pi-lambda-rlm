@@ -1080,6 +1080,111 @@ time.sleep(30)
     });
   });
 
+  it("writes a compact source-free debug artifact when debug mode is enabled for a successful run", async () => {
+    const contextPath = await tempContextFile(
+      "SECRET_SUCCESS_SOURCE_CONTENT should not appear in debug logs.",
+    );
+    const debugLogDir = await mkdtemp(join(tmpdir(), "lambda-rlm-debug-success-"));
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import json, sys
+request = json.loads(sys.stdin.readline())
+print(json.dumps({"type":"run_progress","runId":request["runId"],"phase":"planned","plan":{"taskType":"qa","composeOp":"select_relevant","useFilter":True,"kStar":2,"tauStar":100,"depth":1,"costEstimate":123,"n":456}}), flush=True)
+print(json.dumps({"type":"run_result","runId":request["runId"],"ok":True,"content":"debug success answer","modelCalls":0,"metadata":{"plan":{"task_type":"qa","compose_op":"select_relevant","use_filter":True,"k_star":2,"tau_star":100,"depth":1,"cost_estimate":123,"n":456}}}), flush=True)
+`);
+
+    const result = await executeLambdaRlmTool(
+      { contextPath, debug: true, question: "Successful debug?" },
+      { bridgePath, debugLogDir },
+    );
+
+    expect(result.details).toMatchObject({
+      authoritativeAnswerAvailable: true,
+      debugLogPath: expect.stringContaining(debugLogDir),
+      ok: true,
+      runStatus: "succeeded",
+    });
+    expect(JSON.stringify(result.details)).not.toContain("run_progress");
+    expect(JSON.stringify(result.details)).not.toContain("model_callback_requested");
+    expect(firstContentText(result)).toContain("Debug log:");
+
+    const { debugLogPath } = result.details;
+    if (typeof debugLogPath !== "string") {
+      throw new TypeError("Expected debugLogPath to be a string.");
+    }
+    const debugLogText = await readFile(debugLogPath, "utf-8");
+    const debugLog = JSON.parse(debugLogText) as Record<string, unknown>;
+    expect(debugLog).toMatchObject({
+      input: { sourceCount: 1, questionChars: "Successful debug?".length },
+      lambdaRlm: { plan: { taskType: "qa", kStar: 2 } },
+      modelCalls: { requested: 0, responses: 0 },
+      schemaVersion: 1,
+      status: "succeeded",
+    });
+    expect(debugLogText).toContain("run_progress");
+    expect(debugLogText).toContain("run_result");
+    expect(debugLogText).not.toContain("SECRET_SUCCESS_SOURCE_CONTENT");
+  });
+
+  it("writes a compact source-free debug artifact when debug mode is enabled for a timed-out run", async () => {
+    const contextPath = await tempContextFile(
+      "SECRET_DEBUG_SOURCE_CONTENT should not appear in debug logs.",
+    );
+    const debugLogDir = await mkdtemp(join(tmpdir(), "lambda-rlm-debug-log-"));
+    const bridgePath = await tempPythonBridgeScript(`#!/usr/bin/env python3
+import json, sys, time
+request = json.loads(sys.stdin.readline())
+print(json.dumps({"type":"run_progress","runId":request["runId"],"phase":"planned","plan":{"taskType":"qa","composeOp":"select_relevant","useFilter":True,"kStar":2,"tauStar":100,"depth":1,"costEstimate":123,"n":456}}), flush=True)
+print(json.dumps({"type":"model_callback_request","runId":request["runId"],"requestId":"model-call-1","prompt":"SECRET_DEBUG_PROMPT_BODY","metadata":{"phase":"execute_phi","combinator":"leaf","promptChars":24}}), flush=True)
+time.sleep(30)
+`);
+
+    const result = await executeLambdaRlmTool(
+      { contextPath, debug: true, question: "Timeout?", wholeRunTimeoutMs: 30 },
+      {
+        bridgePath,
+        debugLogDir,
+        leafProcessRunner: (invocation) =>
+          resolveOnAbort(invocation.signal, {
+            exitCode: null,
+            signal: "SIGTERM",
+            stderr: "SECRET_CHILD_STDERR",
+            stdout: "SECRET_CHILD_STDOUT",
+          }),
+      },
+    );
+
+    expect(result.details).toMatchObject({
+      debugLogPath: expect.stringContaining(debugLogDir),
+      error: { code: "whole_run_timeout" },
+      ok: false,
+      runStatus: "runtime_failed",
+    });
+    expect(JSON.stringify(result.details)).not.toContain("run_progress");
+    expect(JSON.stringify(result.details)).not.toContain("model_callback_requested");
+    expect(firstContentText(result)).toContain("Debug log:");
+
+    const { debugLogPath } = result.details;
+    if (typeof debugLogPath !== "string") {
+      throw new TypeError("Expected debugLogPath to be a string.");
+    }
+    const debugLogText = await readFile(debugLogPath, "utf-8");
+    const debugLog = JSON.parse(debugLogText) as Record<string, unknown>;
+    expect(debugLog).toMatchObject({
+      error: { code: "whole_run_timeout" },
+      input: { sourceCount: 1, questionChars: "Timeout?".length },
+      lambdaRlm: { plan: { taskType: "qa", kStar: 2 } },
+      runId: expect.stringMatching(/^lambda-rlm-/),
+      schemaVersion: 1,
+      status: "runtime_failed",
+    });
+    expect(debugLogText).toContain("model_callback_requested");
+    expect(debugLogText).toContain("whole_run_timeout");
+    expect(debugLogText).not.toContain("SECRET_DEBUG_SOURCE_CONTENT");
+    expect(debugLogText).not.toContain("SECRET_DEBUG_PROMPT_BODY");
+    expect(debugLogText).not.toContain("SECRET_CHILD_STDOUT");
+    expect(debugLogText).not.toContain("SECRET_CHILD_STDERR");
+  });
+
   it("passes configured per-model-call timeout into the leaf runner and reports cleanup as a runtime failure", async () => {
     const contextPath = await tempContextFile("per call timeout context");
     let observedAbort = false;

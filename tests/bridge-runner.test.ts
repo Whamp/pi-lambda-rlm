@@ -105,8 +105,38 @@ describe("Python NDJSON bridge runner", () => {
       }),
     ]);
     expect(result.finalResults).toHaveLength(1);
+    expect(result.progressEvents).toStrictEqual([
+      expect.objectContaining({
+        phase: "planned",
+        plan: expect.objectContaining({
+          composeOp: "select_relevant",
+          taskType: "qa",
+        }),
+      }),
+    ]);
+    expect(result.timeline).toStrictEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ event: "run_request_sent" }),
+        expect.objectContaining({ event: "run_progress", phase: "planned" }),
+        expect.objectContaining({
+          event: "model_callback_requested",
+          promptChars: expect.any(Number),
+          requestId: "model-call-1",
+        }),
+        expect.objectContaining({
+          durationMs: expect.any(Number),
+          event: "model_callback_completed",
+          requestId: "model-call-2",
+          stdoutChars: "real bridge model answer".length,
+        }),
+        expect.objectContaining({ event: "run_result", status: "succeeded" }),
+      ]),
+    );
+    const timelineText = JSON.stringify(result.timeline);
+    expect(timelineText).not.toContain("small context for bridge test");
+    expect(timelineText).not.toContain("What is this file about?");
     expect(result.stderr).toContain("bridge: received real Lambda-RLM run request run-test-1");
-    expect(result.stdoutLines).toHaveLength(3);
+    expect(result.stdoutLines).toHaveLength(4);
   });
 
   it("rejects model callback requests that omit explicit metadata", async () => {

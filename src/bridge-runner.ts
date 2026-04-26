@@ -52,6 +52,17 @@ export interface ModelCallbackRequest {
   metadata: Record<string, unknown>;
 }
 
+export interface BridgeProgressEvent {
+  phase: string;
+  [key: string]: unknown;
+}
+
+export interface BridgeTimelineEvent {
+  elapsedMs: number;
+  event: string;
+  [key: string]: unknown;
+}
+
 export type ModelCallbackResponse = (LeafModelCallSuccess | LeafModelCallFailureDetails) & {
   metadata?: Record<string, unknown>;
 };
@@ -80,8 +91,10 @@ export type CompletedSyntheticBridgeRun = BridgeRunResult & {
   modelCallbacks: Omit<ModelCallbackRequest, "type" | "runId">[];
   modelCallResponses: ModelCallbackResponse[];
   finalResults: BridgeRunResult[];
+  progressEvents: BridgeProgressEvent[];
   stdoutLines: string[];
   stderr: string;
+  timeline: BridgeTimelineEvent[];
 };
 
 function isLeafModelCallFailureDetails(value: unknown): value is LeafModelCallFailureDetails {
@@ -128,11 +141,28 @@ export async function runSyntheticBridge(options: {
   const callbacks: Omit<ModelCallbackRequest, "type" | "runId">[] = [];
   const modelCallResponses: ModelCallbackResponse[] = [];
   const finalResults: BridgeRunResult[] = [];
+  const progressEvents: BridgeProgressEvent[] = [];
+  const timeline: BridgeTimelineEvent[] = [];
+  const startedAt = Date.now();
   let pendingCallbackId: string | undefined;
   let settled = false;
   let startedModelCalls = 0;
   const runAbortController = new AbortController();
   let wholeRunTimeout: NodeJS.Timeout | undefined;
+
+  function elapsedMs() {
+    return Date.now() - startedAt;
+  }
+
+  function recordTimeline(event: string, fields: Record<string, unknown> = {}) {
+    timeline.push({ elapsedMs: elapsedMs(), event, ...fields });
+  }
+
+  function telemetrySnapshot() {
+    return { progressEvents: [...progressEvents], timeline: [...timeline] };
+  }
+
+  recordTimeline("bridge_process_started", { pythonPath });
 
   function protocolError(code: string, message: string, line?: string): BridgeProtocolError {
     return new BridgeProtocolError(code, message, {
@@ -155,6 +185,7 @@ export async function runSyntheticBridge(options: {
       { stderr, stdoutLines },
       modelCallResponses,
       finalResults.length,
+      telemetrySnapshot(),
     );
   }
 
@@ -256,8 +287,10 @@ export async function runSyntheticBridge(options: {
         }
       });
 
-    const onExternalAbort = () =>
+    const onExternalAbort = () => {
+      recordTimeline("run_cancelled", { pendingCallbackId, startedModelCalls });
       fail(runtimeFailure("run_cancelled", "Lambda-RLM run was cancelled."));
+    };
     options.signal?.addEventListener("abort", onExternalAbort, { once: true });
     removeExternalAbortListener = () =>
       options.signal?.removeEventListener("abort", onExternalAbort);
@@ -266,6 +299,11 @@ export async function runSyntheticBridge(options: {
     }
     if (options.wholeRunTimeoutMs && options.wholeRunTimeoutMs > 0) {
       wholeRunTimeout = setTimeout(() => {
+        recordTimeline("whole_run_timeout", {
+          pendingCallbackId,
+          startedModelCalls,
+          timeoutMs: options.wholeRunTimeoutMs,
+        });
         fail(
           runtimeFailure(
             "whole_run_timeout",
@@ -298,6 +336,13 @@ export async function runSyntheticBridge(options: {
       }
 
       return message as Record<string, unknown>;
+    }
+
+    function isRunProgressMessage(typed: Record<string, unknown>): typed is {
+      phase: string;
+      runId: string;
+    } & Record<string, unknown> {
+      return typed.runId === options.runId && typeof typed.phase === "string";
     }
 
     function isModelCallbackRequest(typed: Record<string, unknown>): typed is {
@@ -365,12 +410,30 @@ export async function runSyntheticBridge(options: {
     }
 
     async function runModelCallback(call: ModelCall, callbackMetadata: Record<string, unknown>) {
+      const started = Date.now();
+      recordTimeline("model_callback_started", {
+        combinator: callbackMetadata.combinator,
+        phase: callbackMetadata.phase,
+        promptChars: call.prompt.length,
+        requestId: call.requestId,
+      });
       let response: ModelCallbackResponse;
       try {
         response = await options.modelCallRunner(call);
       } catch (error) {
         response = failureResponseFromError(error, call);
       }
+
+      const durationMs = Date.now() - started;
+      recordTimeline(response.ok ? "model_callback_completed" : "model_callback_failed", {
+        combinator: callbackMetadata.combinator,
+        durationMs,
+        errorCode: response.ok ? undefined : response.error.code,
+        errorType: response.ok ? undefined : response.error.type,
+        phase: callbackMetadata.phase,
+        requestId: call.requestId,
+        stdoutChars: response.ok ? response.content.length : undefined,
+      });
 
       try {
         await sendModelCallbackResponse(response, callbackMetadata);
@@ -380,6 +443,11 @@ export async function runSyntheticBridge(options: {
     }
 
     function failMaxModelCalls(call: ModelCall, callbackMetadata: Record<string, unknown>) {
+      recordTimeline("max_model_calls_exceeded", {
+        limit: options.maxModelCalls,
+        requestId: call.requestId,
+        startedModelCalls,
+      });
       const response: LeafModelCallFailureDetails = {
         diagnostics: { exitCode: null, stderr: "", stdout: "" },
         error: {
@@ -408,9 +476,27 @@ export async function runSyntheticBridge(options: {
           { stderr, stdoutLines },
           modelCallResponses,
           0,
+          telemetrySnapshot(),
         ),
       );
       pendingCallbackId = undefined;
+    }
+
+    function handleRunProgress(typed: Record<string, unknown>, line: string) {
+      if (isRunProgressMessage(typed) === false) {
+        fail(
+          protocolError(
+            "invalid_run_progress",
+            "Bridge progress message was missing runId or phase.",
+            line,
+          ),
+        );
+        return;
+      }
+      const { phase, runId: _runId, type: _type, ...rest } = typed;
+      const progressEvent: BridgeProgressEvent = { phase, ...rest };
+      progressEvents.push(progressEvent);
+      recordTimeline("run_progress", progressEvent);
     }
 
     function handleModelCallbackRequest(typed: Record<string, unknown>, line: string) {
@@ -437,6 +523,12 @@ export async function runSyntheticBridge(options: {
 
       pendingCallbackId = typed.requestId;
       const callbackMetadata = typed.metadata as Record<string, unknown>;
+      recordTimeline("model_callback_requested", {
+        combinator: callbackMetadata.combinator,
+        phase: callbackMetadata.phase,
+        promptChars: typed.prompt.length,
+        requestId: typed.requestId,
+      });
       const call: ModelCall = {
         metadata: callbackMetadata,
         prompt: typed.prompt,
@@ -497,6 +589,7 @@ export async function runSyntheticBridge(options: {
             { stderr, stdoutLines },
             modelCallResponses,
             1,
+            telemetrySnapshot(),
           ),
         );
         return;
@@ -515,6 +608,10 @@ export async function runSyntheticBridge(options: {
         );
         return;
       }
+      recordTimeline("run_result", {
+        modelCalls: typeof typed.modelCalls === "number" ? typed.modelCalls : callbacks.length,
+        status: "succeeded",
+      });
       finalResults.push({
         content: typed.content,
         modelCalls: typeof typed.modelCalls === "number" ? typed.modelCalls : callbacks.length,
@@ -530,6 +627,10 @@ export async function runSyntheticBridge(options: {
       stdoutLines.push(line);
       const typed = parseStdoutMessage(line);
       if (typed === undefined) {
+        return;
+      }
+      if (typed.type === "run_progress") {
+        handleRunProgress(typed, line);
         return;
       }
       if (typed.type === "model_callback_request") {
@@ -588,8 +689,10 @@ export async function runSyntheticBridge(options: {
         finalResults,
         modelCallResponses,
         modelCallbacks: callbacks,
+        progressEvents,
         stderr,
         stdoutLines,
+        timeline,
       });
     }
 
@@ -620,6 +723,10 @@ export async function runSyntheticBridge(options: {
   const writeRequest = async () => {
     try {
       await writeBridgeMessage(request, "run request");
+      recordTimeline("run_request_sent", {
+        contextChars: options.context?.length,
+        questionChars: options.question.length,
+      });
     } catch (error) {
       failBridge(error);
     }

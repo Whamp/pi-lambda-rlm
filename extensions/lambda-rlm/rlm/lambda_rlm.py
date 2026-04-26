@@ -41,7 +41,7 @@ from collections import Counter
 sys.setrecursionlimit(5000)
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 from rlm.clients import BaseLM, get_client
 from rlm.core.lm_handler import LMHandler
@@ -341,6 +341,7 @@ class LambdaRLM:
         client:                Optional injected BaseLM. Local patch only; when omitted,
                                upstream get_client(backend, backend_kwargs) behavior is used.
         prompt_registry:       Optional local patch prompt registry for resolved overlays.
+        progress_callback:     Optional local patch callback for compact source-free run telemetry.
     """
 
     def __init__(
@@ -358,6 +359,7 @@ class LambdaRLM:
         logger: RLMLogger | None = None,
         client: BaseLM | None = None,
         prompt_registry: LambdaPromptRegistry | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.backend = backend
         self.backend_kwargs = backend_kwargs or {}
@@ -372,8 +374,13 @@ class LambdaRLM:
         self.logger = logger
         self.client = client
         self.prompt_registry = prompt_registry or LambdaPromptRegistry()
+        self.progress_callback = progress_callback
 
     # ── Public API ────────────────────────────────────────────────────────────
+
+    def _emit_progress(self, payload: dict[str, Any]) -> None:
+        if self.progress_callback is not None:
+            self.progress_callback(payload)
 
     def _model_call_metadata(
         self,
@@ -487,6 +494,21 @@ class LambdaRLM:
 
                 # ── Phase 3: Optimal Planning (0 LLM calls, pure math) ────────
                 plan = self._plan(task_type, n)
+                self._emit_progress(
+                    {
+                        "phase": "planned",
+                        "plan": {
+                            "taskType": plan.task_type.value,
+                            "composeOp": plan.compose_op.value,
+                            "useFilter": plan.pipeline.use_filter,
+                            "kStar": plan.k_star,
+                            "tauStar": plan.tau_star,
+                            "depth": plan.depth,
+                            "costEstimate": plan.cost_estimate,
+                            "n": plan.n,
+                        },
+                    }
+                )
 
                 if self.verbose:
                     print(
@@ -530,7 +552,7 @@ class LambdaRLM:
                         "patchBoundary": {
                             "package": "rlm",
                             "upstreamCommit": UPSTREAM_REFERENCE_COMMIT,
-                            "localPatch": "optional BaseLM client injection and explicit model-call metadata",
+                            "localPatch": "optional BaseLM client injection, explicit model-call metadata, and progress callback telemetry",
                         },
                     },
                 )

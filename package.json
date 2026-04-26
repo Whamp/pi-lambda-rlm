@@ -17,8 +17,9 @@
   "scripts": {
     "lint": "ultracite check",
     "lint:fix": "ultracite fix",
-    "test": "vitest run --exclude tests/pi-leaf-smoke.test.ts --exclude .worktrees/**",
+    "test": "vitest run --exclude tests/pi-leaf-smoke.test.ts --exclude benchmarks/**/*.manual.test.ts --exclude .worktrees/**",
     "test:pi-leaf-smoke": "vitest run tests/pi-leaf-smoke.test.ts",
+    "bench:context-rot:niah": "vitest run benchmarks/context-rot/run-lambda-rlm-niah.manual.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

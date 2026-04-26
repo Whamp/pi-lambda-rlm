@@ -54,13 +54,16 @@ interface RegisteredCommand {
         scopedModelPatterns?: string[];
       };
       ui?: {
-        notify?: (message: string) => void | Promise<void>;
-        promptText?: (prompt: string) => string | Promise<string>;
+        input?: (
+          prompt: string,
+          placeholder?: string,
+        ) => string | undefined | Promise<string | undefined>;
+        notify?: (message: string, type?: "info" | "warning" | "error") => void | Promise<void>;
+        promptText?: (prompt: string) => string | undefined | Promise<string | undefined>;
         select?: (
           prompt: string,
-          choices: { id: string }[],
-          defaultChoiceId?: string,
-        ) => string | Promise<string>;
+          choices: string[],
+        ) => string | undefined | Promise<string | undefined>;
       };
     }) => Promise<ToolResult>;
   };
@@ -262,6 +265,7 @@ describe("lambda_rlm Pi extension registration", () => {
       properties: {
         contextPath: { type: "string" },
         contextPaths: { items: { minLength: 1, type: "string" }, minItems: 1, type: "array" },
+        debug: { type: "boolean" },
         maxInputBytes: { minimum: 1, type: "number" },
         maxModelCalls: { minimum: 1, type: "number" },
         modelCallTimeoutMs: { minimum: 1, type: "number" },
@@ -285,6 +289,8 @@ describe("lambda_rlm Pi extension registration", () => {
         "Path to one readable UTF-8 text file. Pass exactly one of contextPath or contextPaths. lambda_rlm reads this file internally to preserve parent-agent context; do not inline file contents.",
       contextPaths:
         "Ordered paths to readable UTF-8 text files for one consolidated Lambda-RLM run. Pass exactly one of contextPath or contextPaths; do not inline, paste, or concatenate file contents yourself.",
+      debug:
+        "Advanced diagnostics mode. When true, writes a compact source-free run timeline and telemetry artifact to disk for debugging successes, failures, and timeouts. Omit during normal use.",
       maxInputBytes:
         "Caps the total UTF-8 bytes read from all referenced context files for this run. Advanced tightening only; cannot exceed the resolved config limit. Omit unless debugging or retrying after an input-limit failure.",
       maxModelCalls:
@@ -303,6 +309,7 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(sortedStrings(Object.keys(tool.parameters.properties))).toStrictEqual([
       "contextPath",
       "contextPaths",
+      "debug",
       "maxInputBytes",
       "maxModelCalls",
       "modelCallTimeoutMs",
@@ -356,6 +363,7 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(tool.promptGuidelines).toStrictEqual([
       "Use lambda_rlm when the task requires long-context reasoning over one or more readable text files by path, especially for answering questions, summarizing, extracting facts, synthesizing across files, analyzing, or diagnosing from context that would waste or overflow parent-agent context if read directly.",
       "Call lambda_rlm with exactly one of contextPath or contextPaths plus question. Pass paths to readable text files only; do not pass inline source text, raw prompts, pasted file contents, URLs, or directories directly. Convert or pack other sources into readable text files first.",
+      "Set debug only when explicitly investigating a Lambda-RLM success, failure, or timeout; debug mode writes compact source-free run telemetry to disk and should be omitted during normal use.",
       "Treat lambda_rlm as an Agent Context Avoidance boundary: it reads source files internally and returns a bounded answer rather than the source corpus.",
       "Expect a bounded answer plus compact run metadata. Do not ask lambda_rlm to return full source contents, large evidence packs, full execution traces, or citation dumps by default.",
       "If exact source verification is needed after lambda_rlm answers, use normal narrow follow-up tools such as read or rg on specific files or terms. Do not ask lambda_rlm to dump broad supporting context.",
@@ -485,6 +493,20 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(command.options.handler).toStrictEqual(expect.any(Function));
   });
 
+  it("does not register a separate one-time init command that pollutes the slash command namespace", () => {
+    const commands: RegisteredCommand[] = [];
+    registerLambdaRlmExtension({
+      registerCommand: (name, commandOptions) =>
+        commands.push({ name, options: commandOptions as RegisteredCommand["options"] }),
+      registerTool: () => {
+        // Command-only registration test.
+      },
+    });
+
+    expect(commands.map((command) => command.name)).toStrictEqual(["lambda-rlm-doctor"]);
+    expect(commands.map((command) => command.name)).not.toContain("lambda-rlm-init");
+  });
+
   it("surfaces the doctor report through the command handler and notifies when Pi UI is available", async () => {
     const command = registeredLambdaRlmCommand();
     const notifications: string[] = [];
@@ -505,7 +527,35 @@ describe("lambda_rlm Pi extension registration", () => {
     const details = result.details as { actions: unknown; checks: { name: string }[] };
     expect(details.checks.map((check) => check.name)).toContain("mock_bridge");
     expect(details.actions).toBeTruthy();
-    expect(notifications).toStrictEqual([text.split("\n", 1)[0]]);
+    expect(notifications).toStrictEqual([text]);
+  });
+
+  it("renders doctor repair choices as primitive strings and includes failing diagnostics in the prompt", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-select-strings-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const prompts: string[] = [];
+    const choiceSets: unknown[][] = [];
+
+    await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        select: (prompt, choices) => {
+          prompts.push(prompt);
+          choiceSets.push(choices);
+          return "keep_current_configuration";
+        },
+      },
+    });
+
+    expect(prompts[0]).toContain("lambda_rlm doctor found errors");
+    expect(prompts[0]).toContain("leaf_model");
+    expect(prompts[0]).toContain("No Formal Leaf model is configured");
+    expect(choiceSets[0]).toStrictEqual(expect.arrayContaining([expect.any(String)]));
+    expect(choiceSets[0]?.every((choice) => typeof choice === "string")).toBeTruthy();
+    expect(choiceSets[0]?.join("\n")).not.toContain("[object Object]");
+    expect(choiceSets[0]?.join("\n")).toContain("Choose or change the Formal Leaf model");
   });
 
   it("runs non-interactive doctor as diagnostic-only output without UI prompts or repair-flow actions", async () => {
@@ -546,18 +596,17 @@ describe("lambda_rlm Pi extension registration", () => {
         promptText: () => {
           throw new Error("manual entry should not be needed for a selected candidate");
         },
-        select: (prompt, choices, defaultChoiceId) => {
-          selections.push(
-            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
-          );
+        select: (prompt, choices) => {
+          selections.push(`${prompt}:${choices.join(",")}`);
           return selections.length === 1 ? "select_formal_leaf_model" : "anthropic/claude";
         },
       },
     });
 
     expect(selections[1]).toContain("Candidate Leaf Model Set");
-    expect(selections[1]).toContain(":anthropic/claude:");
-    expect(selections[1]).toContain("anthropic/claude,google/gemini");
+    expect(selections[1]).toContain("Default: anthropic/claude [anthropic/claude]");
+    expect(selections[1]).toContain("anthropic/claude [anthropic/claude]");
+    expect(selections[1]).toContain("google/gemini [google/gemini]");
     expect(selections[1]).toContain("__manual_formal_leaf_model__");
     expect(selections[1]).toContain("__show_all_registered_formal_leaf_models__");
     await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
@@ -587,10 +636,8 @@ describe("lambda_rlm Pi extension registration", () => {
           notifications.push(message);
         },
         promptText: () => "unused/manual",
-        select: (prompt, choices, defaultChoiceId) => {
-          selections.push(
-            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
-          );
+        select: (prompt, choices) => {
+          selections.push(`${prompt}:${choices.join(",")}`);
           if (selections.length === 1) {
             return "select_formal_leaf_model";
           }
@@ -634,10 +681,8 @@ describe("lambda_rlm Pi extension registration", () => {
           prompts.push(prompt);
           return "manual/provider";
         },
-        select: (prompt, choices, defaultChoiceId) => {
-          selections.push(
-            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
-          );
+        select: (prompt, choices) => {
+          selections.push(`${prompt}:${choices.join(",")}`);
           return selections.length === 1
             ? "select_formal_leaf_model"
             : "__manual_formal_leaf_model__";
@@ -672,10 +717,8 @@ describe("lambda_rlm Pi extension registration", () => {
           prompts.push(prompt);
           return "manual/provider";
         },
-        select: (prompt, choices, defaultChoiceId) => {
-          selections.push(
-            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
-          );
+        select: (prompt, choices) => {
+          selections.push(`${prompt}:${choices.join(",")}`);
           return selections.length === 1
             ? "select_formal_leaf_model"
             : "__manual_formal_leaf_model__";
@@ -700,10 +743,8 @@ describe("lambda_rlm Pi extension registration", () => {
       cwd: root,
       leafProcessRunner: okDoctorRunner,
       ui: {
-        select: (prompt, choices, defaultChoiceId) => {
-          selections.push(
-            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
-          );
+        select: (prompt, choices) => {
+          selections.push(`${prompt}:${choices.join(",")}`);
           return selections.length === 1 ? "change_formal_leaf_thinking" : "high";
         },
       },
@@ -711,8 +752,10 @@ describe("lambda_rlm Pi extension registration", () => {
 
     expect(selections[0]).toContain("change_formal_leaf_thinking");
     expect(selections[1]).toContain("Formal Leaf Thinking Selection");
-    expect(selections[1]).toContain(":off:");
-    expect(selections[1]).toContain("off,minimal,low,medium,high,xhigh");
+    expect(selections[1]).toContain("Default: off [off]");
+    for (const value of ["off", "minimal", "low", "medium", "high", "xhigh"]) {
+      expect(selections[1]).toContain(`[${value}]`);
+    }
     await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
       'thinking = "high"',
     );
@@ -739,10 +782,8 @@ describe("lambda_rlm Pi extension registration", () => {
       cwd: root,
       leafProcessRunner: okDoctorRunner,
       ui: {
-        select: (prompt, choices, defaultChoiceId) => {
-          selections.push(
-            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
-          );
+        select: (prompt, choices) => {
+          selections.push(`${prompt}:${choices.join(",")}`);
           if (selections.length === 1) {
             return "change_formal_leaf_thinking";
           }
@@ -755,7 +796,8 @@ describe("lambda_rlm Pi extension registration", () => {
     });
 
     expect(selections[2]).toContain("Configuration Write Target");
-    expect(selections[2]).toContain(":project:");
+    expect(selections[2]).toContain("Default: Project Tool Configuration [project]");
+    expect(selections[2]).toContain("Global Tool Configuration [global]");
     await expect(readFile(projectConfigPath, "utf-8")).resolves.toContain('thinking = "high"');
     await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
       'thinking = "low"',
@@ -781,10 +823,8 @@ describe("lambda_rlm Pi extension registration", () => {
       cwd: root,
       leafProcessRunner: okDoctorRunner,
       ui: {
-        select: (prompt, choices, defaultChoiceId) => {
-          selections.push(
-            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
-          );
+        select: (prompt, choices) => {
+          selections.push(`${prompt}:${choices.join(",")}`);
           if (selections.length === 1) {
             return "change_formal_leaf_thinking";
           }
@@ -797,7 +837,8 @@ describe("lambda_rlm Pi extension registration", () => {
     });
 
     expect(selections[2]).toContain("Configuration Write Target");
-    expect(selections[2]).toContain(":global:");
+    expect(selections[2]).toContain("Default: Global Tool Configuration [global]");
+    expect(selections[2]).toContain("Project Tool Configuration [project]");
     await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
       'thinking = "high"',
     );
@@ -823,10 +864,8 @@ describe("lambda_rlm Pi extension registration", () => {
           prompts.push(prompt);
           return "local/qwen";
         },
-        select: (prompt, choices, defaultChoiceId) => {
-          selections.push(
-            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
-          );
+        select: (prompt, choices) => {
+          selections.push(`${prompt}:${choices.join(",")}`);
           return "select_formal_leaf_model";
         },
       },
@@ -865,18 +904,16 @@ describe("lambda_rlm Pi extension registration", () => {
       leafProcessRunner: okDoctorRunner,
       ui: {
         promptText: () => "project/new",
-        select: (prompt, choices, defaultChoiceId) => {
-          selections.push(
-            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
-          );
+        select: (prompt, choices) => {
+          selections.push(`${prompt}:${choices.join(",")}`);
           return selections.length === 1 ? "select_formal_leaf_model" : "project";
         },
       },
     });
 
     expect(selections[1]).toContain("Configuration Write Target");
-    expect(selections[1]).toContain(":project:");
-    expect(selections[1]).toContain("global,project");
+    expect(selections[1]).toContain("Default: Project Tool Configuration [project]");
+    expect(selections[1]).toContain("Global Tool Configuration [global]");
     await expect(readFile(projectConfigPath, "utf-8")).resolves.toContain('model = "project/new"');
     await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
       'model = "global/old"',
@@ -901,17 +938,15 @@ describe("lambda_rlm Pi extension registration", () => {
       leafProcessRunner: okDoctorRunner,
       ui: {
         promptText: () => "global/new",
-        select: (prompt, choices, defaultChoiceId) => {
-          selections.push(
-            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
-          );
+        select: (prompt, choices) => {
+          selections.push(`${prompt}:${choices.join(",")}`);
           return selections.length === 1 ? "select_formal_leaf_model" : "global";
         },
       },
     });
 
-    expect(selections[1]).toContain(":global:");
-    expect(selections[1]).toContain("global,project");
+    expect(selections[1]).toContain("Default: Global Tool Configuration [global]");
+    expect(selections[1]).toContain("Project Tool Configuration [project]");
     await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
       'model = "global/new"',
     );
@@ -969,10 +1004,8 @@ describe("lambda_rlm Pi extension registration", () => {
       cwd: root,
       leafProcessRunner: okDoctorRunner,
       ui: {
-        select: (prompt, choices, defaultChoiceId) => {
-          selections.push(
-            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
-          );
+        select: (prompt, choices) => {
+          selections.push(`${prompt}:${choices.join(",")}`);
           return "cancel_invalid_config_repair";
         },
       },
@@ -1297,6 +1330,7 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(sortedStrings(Object.keys(tool.parameters.properties))).toStrictEqual([
       "contextPath",
       "contextPaths",
+      "debug",
       "maxInputBytes",
       "maxModelCalls",
       "modelCallTimeoutMs",

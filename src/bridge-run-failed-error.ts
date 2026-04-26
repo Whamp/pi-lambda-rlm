@@ -5,7 +5,12 @@ import {
   summarizeTextDiagnostic,
 } from "./diagnostics.js";
 import type { LeafModelCallFailureDetails } from "./leaf-runner.js";
-import type { BridgeFailedRunResult, ModelCallbackResponse } from "./bridge-runner.js";
+import type {
+  BridgeFailedRunResult,
+  BridgeProgressEvent,
+  BridgeTimelineEvent,
+  ModelCallbackResponse,
+} from "./bridge-runner.js";
 
 export class BridgeRunFailedError extends Error {
   readonly details: {
@@ -18,6 +23,8 @@ export class BridgeRunFailedError extends Error {
     };
     modelCallResponses: ModelCallbackResponse[];
     finalResults: number;
+    progressEvents: BridgeProgressEvent[];
+    timeline: BridgeTimelineEvent[];
   };
 
   constructor(
@@ -25,6 +32,7 @@ export class BridgeRunFailedError extends Error {
     diagnostics: { stderr: string; stdoutLines: string[] },
     modelCallResponses: ModelCallbackResponse[],
     finalResults = 0,
+    telemetry: { progressEvents?: BridgeProgressEvent[]; timeline?: BridgeTimelineEvent[] } = {},
   ) {
     super(failedRunResult.error.message);
     this.name = "BridgeRunFailedError";
@@ -59,6 +67,8 @@ export class BridgeRunFailedError extends Error {
         response.ok ? response : sanitizeLocalLeafFailureDetails(response),
       ),
       ok: false,
+      progressEvents: telemetry.progressEvents ?? [],
+      timeline: telemetry.timeline ?? [],
     };
   }
 }

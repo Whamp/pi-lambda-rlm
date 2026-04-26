@@ -1,9 +1,9 @@
-import { access, readFile, stat } from "node:fs/promises";
+import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BridgeProtocolError, BridgeRunFailedError, runSyntheticBridge } from "./bridge-runner.js";
-import type { ModelCallRunner } from "./bridge-runner.js";
+import type { BridgeProgressEvent, BridgeTimelineEvent, ModelCallRunner } from "./bridge-runner.js";
 import { resolveLambdaRlmConfig } from "./config-resolver.js";
 import type { ConfigValidationError, LeafConfig, RunConfig } from "./config-resolver.js";
 import { runFormalPiLeafModelCall } from "./leaf-runner.js";
@@ -24,6 +24,7 @@ import type { OutputLimitOptions, SourceMetadata, TextContent } from "./result-f
 const ALLOWED_KEYS = new Set([
   "contextPath",
   "contextPaths",
+  "debug",
   "question",
   "maxInputBytes",
   "outputMaxBytes",
@@ -37,6 +38,7 @@ export interface LambdaRlmParams {
   contextPath?: string;
   contextPaths?: string[];
   question: string;
+  debug?: boolean;
   maxInputBytes?: number;
   outputMaxBytes?: number;
   outputMaxLines?: number;
@@ -77,6 +79,8 @@ export interface ExecuteLambdaRlmToolOptions {
   projectPromptDir?: string;
   /** Optional directory for recoverable full output when truncation occurs. */
   fullOutputDir?: string;
+  /** Optional directory for source-free debug run artifacts. */
+  debugLogDir?: string;
   /** Extension-scoped queue injection for tests/host integration. */
   modelCallQueue?: ModelCallConcurrencyQueue;
   /** Mutable extension-instance state used to lazily create one shared queue after config resolution. */
@@ -188,6 +192,20 @@ function validatedQuestion(value: Record<string, unknown>) {
   return question;
 }
 
+function validatedDebug(value: Record<string, unknown>) {
+  if (value.debug === undefined) {
+    return;
+  }
+  if (typeof value.debug !== "boolean") {
+    throw new LambdaRlmValidationError(
+      "invalid_debug",
+      "debug must be a boolean when provided.",
+      "debug",
+    );
+  }
+  return value.debug;
+}
+
 function validatedPerRunOptions(value: Record<string, unknown>) {
   const perRun: PerRunOptions = {};
   for (const field of PER_RUN_FIELDS) {
@@ -229,10 +247,12 @@ export function validateLambdaRlmParams(value: unknown): LambdaRlmParams {
   const contextPath = validatedContextPath(value, hasContextPath);
   const contextPaths = validatedContextPaths(value, hasContextPaths);
   const question = validatedQuestion(value);
+  const debug = validatedDebug(value);
   const perRun = validatedPerRunOptions(value);
+  const debugParam = debug === undefined ? {} : { debug };
 
   if (hasContextPath) {
-    return { contextPath, question, ...perRun };
+    return { contextPath, question, ...debugParam, ...perRun };
   }
   if (contextPaths === undefined) {
     throw new LambdaRlmValidationError(
@@ -241,7 +261,7 @@ export function validateLambdaRlmParams(value: unknown): LambdaRlmParams {
       "contextPaths",
     );
   }
-  return { contextPaths, question, ...perRun };
+  return { contextPaths, question, ...debugParam, ...perRun };
 }
 
 function maxInputBytesError(
@@ -600,11 +620,172 @@ function successBridgeRunDetails(bridge: CompletedBridgeRun, context: RuntimeFor
   };
 }
 
+function compactDebugInput(sources: SourceMetadata[], question: string) {
+  return {
+    questionChars: question.length,
+    sourceCount: sources.length,
+    sources: sources.map((source) => ({
+      bytes: source.bytes,
+      chars: source.chars,
+      lines: source.lines,
+      path: source.path,
+      resolvedPath: source.resolvedPath,
+      sha256: source.sha256,
+      sourceNumber: source.sourceNumber,
+    })),
+  };
+}
+
+function planFromProgress(
+  progressEvents: BridgeProgressEvent[],
+  metadata?: Record<string, unknown>,
+) {
+  const planned = progressEvents.find(
+    (event) => event.phase === "planned" && event.plan && typeof event.plan === "object",
+  );
+  if (planned?.plan && typeof planned.plan === "object" && !Array.isArray(planned.plan)) {
+    return planned.plan;
+  }
+  const plan = metadata?.plan;
+  if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
+    return;
+  }
+  const record = plan as Record<string, unknown>;
+  return {
+    composeOp: record.compose_op,
+    costEstimate: record.cost_estimate,
+    depth: record.depth,
+    kStar: record.k_star,
+    n: record.n,
+    taskType: record.task_type,
+    tauStar: record.tau_star,
+    useFilter: record.use_filter,
+  };
+}
+
+function countTimelineEvents(timeline: BridgeTimelineEvent[], event: string) {
+  return timeline.filter((entry) => entry.event === event).length;
+}
+
+function timelineStringField(entry: BridgeTimelineEvent, key: string) {
+  const value = entry[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function countsByTimelineField(timeline: BridgeTimelineEvent[], event: string, key: string) {
+  const counts: Record<string, number> = {};
+  for (const entry of timeline) {
+    if (entry.event !== event) {
+      continue;
+    }
+    const value = timelineStringField(entry, key);
+    if (!value) {
+      continue;
+    }
+    counts[value] = (counts[value] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function inFlightRequestIdsAtEnd(timeline: BridgeTimelineEvent[]) {
+  const open = new Set<string>();
+  for (const entry of timeline) {
+    const requestId = timelineStringField(entry, "requestId");
+    if (!requestId) {
+      continue;
+    }
+    if (entry.event === "model_callback_started") {
+      open.add(requestId);
+    }
+    if (entry.event === "model_callback_completed" || entry.event === "model_callback_failed") {
+      open.delete(requestId);
+    }
+  }
+  return [...open];
+}
+
+function debugModelCallSummary(timeline: BridgeTimelineEvent[], responseCount: number) {
+  return {
+    byCombinator: countsByTimelineField(timeline, "model_callback_requested", "combinator"),
+    byPhase: countsByTimelineField(timeline, "model_callback_requested", "phase"),
+    completed: countTimelineEvents(timeline, "model_callback_completed"),
+    failed: countTimelineEvents(timeline, "model_callback_failed"),
+    inFlightAtEnd: inFlightRequestIdsAtEnd(timeline),
+    requested: countTimelineEvents(timeline, "model_callback_requested"),
+    responses: responseCount,
+    started: countTimelineEvents(timeline, "model_callback_started"),
+  };
+}
+
+function debugError(error: BridgeRunFailedError | BridgeProtocolError) {
+  return {
+    code: error.details.error.code,
+    message: error.details.error.message,
+    type: error.details.error.type,
+  };
+}
+
+function debugLogBaseDir(options: ExecuteLambdaRlmToolOptions) {
+  if (options.debugLogDir) {
+    return options.debugLogDir;
+  }
+  const homeDir = options.homeDir ?? process.env.HOME;
+  return homeDir
+    ? join(homeDir, ".pi", "lambda-rlm", "runs")
+    : join(process.cwd(), ".pi", "lambda-rlm", "runs");
+}
+
+async function writeDebugLog(args: {
+  context: RuntimeFormattingContext;
+  error?: BridgeRunFailedError | BridgeProtocolError;
+  lambdaRlmMetadata?: Record<string, unknown>;
+  modelCallResponseCount: number;
+  options: ExecuteLambdaRlmToolOptions;
+  progressEvents: BridgeProgressEvent[];
+  status: "runtime_failed" | "succeeded";
+  timeline: BridgeTimelineEvent[];
+}) {
+  const runDir = join(debugLogBaseDir(args.options), args.context.runId);
+  await mkdir(runDir, { recursive: true });
+  const debugLogPath = join(runDir, "debug.json");
+  const artifact = {
+    diagnostics: args.error
+      ? {
+          stderr: args.error.details.diagnostics.stderr,
+          stdout: args.error.details.diagnostics.stdout,
+        }
+      : undefined,
+    error: args.error ? debugError(args.error) : undefined,
+    input: compactDebugInput(args.context.sourceMetadata, args.context.question),
+    lambdaRlm: {
+      metadata: args.lambdaRlmMetadata,
+      plan: planFromProgress(args.progressEvents, args.lambdaRlmMetadata),
+    },
+    leaf: {
+      model: args.context.leafModel,
+      profile: "formal_pi_print",
+      thinking: args.context.leafThinking,
+    },
+    modelCalls: debugModelCallSummary(args.timeline, args.modelCallResponseCount),
+    progressEvents: args.progressEvents,
+    protocol: "strict-stdout-stdin-ndjson",
+    runControls: args.context.runConfig,
+    runId: args.context.runId,
+    schemaVersion: 1,
+    status: args.status,
+    timeline: args.timeline,
+  };
+  await writeFile(debugLogPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf-8");
+  return debugLogPath;
+}
+
 function formatBridgeRuntimeFailure(
   error: BridgeRunFailedError | BridgeProtocolError,
   context: RuntimeFormattingContext,
+  debugLogPath?: string,
 ) {
   return formatRuntimeFailure({
+    ...(debugLogPath ? { debugLogPath } : {}),
     error: error.details.error,
     output: context.outputOptions,
     partialBridgeRun:
@@ -834,6 +1015,62 @@ function runBridgeForTool(args: {
   });
 }
 
+function isBridgeRuntimeError(error: unknown): error is BridgeRunFailedError | BridgeProtocolError {
+  return error instanceof BridgeRunFailedError || error instanceof BridgeProtocolError;
+}
+
+function bridgeFailureModelCallResponseCount(error: BridgeRunFailedError | BridgeProtocolError) {
+  return error instanceof BridgeRunFailedError ? error.details.modelCallResponses.length : 0;
+}
+
+function bridgeFailureProgressEvents(error: BridgeRunFailedError | BridgeProtocolError) {
+  return error instanceof BridgeRunFailedError ? error.details.progressEvents : [];
+}
+
+function bridgeFailureTimeline(error: BridgeRunFailedError | BridgeProtocolError) {
+  return error instanceof BridgeRunFailedError ? error.details.timeline : [];
+}
+
+function debugLogPathForBridgeFailure(args: {
+  context: RuntimeFormattingContext;
+  enabled: boolean | undefined;
+  error: BridgeRunFailedError | BridgeProtocolError;
+  options: ExecuteLambdaRlmToolOptions;
+}) {
+  if (!args.enabled) {
+    return;
+  }
+  return writeDebugLog({
+    context: args.context,
+    error: args.error,
+    modelCallResponseCount: bridgeFailureModelCallResponseCount(args.error),
+    options: args.options,
+    progressEvents: bridgeFailureProgressEvents(args.error),
+    status: "runtime_failed",
+    timeline: bridgeFailureTimeline(args.error),
+  });
+}
+
+function debugLogPathForSuccessfulBridge(args: {
+  bridge: CompletedBridgeRun;
+  context: RuntimeFormattingContext;
+  enabled: boolean | undefined;
+  options: ExecuteLambdaRlmToolOptions;
+}) {
+  if (!args.enabled) {
+    return;
+  }
+  return writeDebugLog({
+    context: args.context,
+    modelCallResponseCount: args.bridge.modelCallResponses.length,
+    options: args.options,
+    progressEvents: args.bridge.progressEvents,
+    status: "succeeded",
+    timeline: args.bridge.timeline,
+    ...(args.bridge.metadata ? { lambdaRlmMetadata: args.bridge.metadata } : {}),
+  });
+}
+
 export async function executeLambdaRlmTool(
   params: unknown,
   options: ExecuteLambdaRlmToolOptions = {},
@@ -907,8 +1144,14 @@ export async function executeLambdaRlmTool(
       runId,
       sourceMetadata,
     });
-    if (error instanceof BridgeRunFailedError || error instanceof BridgeProtocolError) {
-      return formatBridgeRuntimeFailure(error, runtimeContext);
+    if (isBridgeRuntimeError(error)) {
+      const debugLogPath = await debugLogPathForBridgeFailure({
+        context: runtimeContext,
+        enabled: validated.debug,
+        error,
+        options,
+      });
+      return formatBridgeRuntimeFailure(error, runtimeContext, debugLogPath);
     }
     throw error;
   }
@@ -923,9 +1166,16 @@ export async function executeLambdaRlmTool(
     runId,
     sourceMetadata,
   });
+  const debugLogPath = await debugLogPathForSuccessfulBridge({
+    bridge,
+    context: runtimeContext,
+    enabled: validated.debug,
+    options,
+  });
   return formatSuccessResult({
     answer: bridge.content,
     bridgeRun: successBridgeRunDetails(bridge, runtimeContext),
+    ...(debugLogPath ? { debugLogPath } : {}),
     modelCallSummary: modelCallSummaryFromBridge(bridge),
     output: outputOptions,
     question: validated.question,

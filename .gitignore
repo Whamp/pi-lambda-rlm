@@ -25,6 +25,7 @@ venv/
 .env
 .env.*
 .pi/lambda-rlm/config.toml
+benchmarks/context-rot/artifacts/
 
 # Logs
 *.log

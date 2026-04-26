@@ -161,6 +161,7 @@ export async function formatSuccessResult(args: {
   sources: SourceMetadata[];
   question: string;
   bridgeRun: Record<string, unknown>;
+  debugLogPath?: string;
   modelCallSummary: Record<string, unknown>;
   output?: OutputLimitOptions;
 }) {
@@ -173,9 +174,12 @@ export async function formatSuccessResult(args: {
   const rawVisible = [
     `Run summary: Real Lambda-RLM completed; ${sourceSummary}.`,
     `Model calls: ${String(args.modelCallSummary.total ?? 0)}.`,
+    args.debugLogPath ? `Debug log: ${args.debugLogPath}` : undefined,
     "",
     args.answer,
-  ].join("\n");
+  ]
+    .filter((line) => line !== undefined)
+    .join("\n");
   const bounded = await boundVisibleOutput(rawVisible, args.output);
   return {
     content: [{ text: bounded.text, type: "text" }] as TextContent[],
@@ -183,6 +187,7 @@ export async function formatSuccessResult(args: {
       answerChars: args.answer.length,
       authoritativeAnswerAvailable: true,
       bridgeRun: args.bridgeRun,
+      ...(args.debugLogPath ? { debugLogPath: args.debugLogPath } : {}),
       input: { ...sourceDetails(args.sources), questionChars: args.question.length },
       modelCalls: args.modelCallSummary,
       ok: true,
@@ -224,6 +229,7 @@ export function formatValidationFailure(args: { code: string; message: string; f
 }
 
 export async function formatRuntimeFailure(args: {
+  debugLogPath?: string;
   error: { type: string; code: string; message: string };
   sources?: SourceMetadata[];
   question?: string;
@@ -234,6 +240,7 @@ export async function formatRuntimeFailure(args: {
   const visible = [
     `lambda_rlm runtime failed: ${args.error.message}`,
     "No authoritative answer is available from this failed run.",
+    args.debugLogPath ? `Debug log: ${args.debugLogPath}` : undefined,
     args.partialAnswer
       ? "A partial answer was captured and marked non-authoritative in details.partialAnswer."
       : undefined,
@@ -249,6 +256,7 @@ export async function formatRuntimeFailure(args: {
       answer: null,
       authoritativeAnswerAvailable: false,
       error: args.error,
+      ...(args.debugLogPath ? { debugLogPath: args.debugLogPath } : {}),
       ...(args.partialAnswer
         ? { partialAnswer: { authoritative: false, text: args.partialAnswer } }
         : {}),

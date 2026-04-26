@@ -235,7 +235,10 @@ class LambdaRLMInjectedClientTests(unittest.TestCase):
         }
         self.assertGreaterEqual({"filter", "leaf", "reducer"}, lmhandler_categories)
         self.assertEqual(result.metadata["patchBoundary"]["upstreamCommit"], UPSTREAM_COMMIT)
-        self.assertEqual(result.metadata["patchBoundary"]["localPatch"], "optional BaseLM client injection and explicit model-call metadata")
+        self.assertEqual(
+            result.metadata["patchBoundary"]["localPatch"],
+            "optional BaseLM client injection, explicit model-call metadata, and progress callback telemetry",
+        )
 
     def test_default_client_path_delegates_to_upstream_factory_when_client_is_omitted(self):
         fake = DeterministicFakeBaseLM()
