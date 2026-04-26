@@ -271,14 +271,42 @@ async function cancelInvalidConfigRepair(args: InteractiveRepairArgs) {
   };
 }
 
+function invalidConfigDetails(report: InteractiveRepairArgs["report"]) {
+  const invalidConfig = report.checks.find(
+    (entry) => entry.name === "config" && entry.status === "error",
+  );
+  const details = invalidConfig?.details ?? {};
+  return {
+    code: typeof details.code === "string" ? details.code : undefined,
+    field: typeof details.field === "string" ? details.field : undefined,
+    path: typeof details.path === "string" ? details.path : undefined,
+    source: typeof details.source === "string" ? details.source : undefined,
+  };
+}
+
+function invalidConfigDetailsText(report: InteractiveRepairArgs["report"]) {
+  const details = invalidConfigDetails(report);
+  return [
+    details.code ? `code=${details.code}` : undefined,
+    details.field ? `field=${details.field}` : undefined,
+    details.source ? `source=${details.source}` : undefined,
+    details.path ? `path=${details.path}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
 async function rewriteInvalidConfig(args: InteractiveRepairArgs) {
   const globalConfigPath =
     globalConfigPathForWorkspace(args.piWorkspacePath) ?? defaultGlobalConfigPath();
+  const details = invalidConfigDetails(args.report);
+  const rewriteTarget = details.path ?? globalConfigPath;
+  const detailsText = invalidConfigDetailsText(args.report);
   const confirmation = await args.ctx.ui?.promptText?.(
-    `Type REWRITE to confirm normalized rewrite of invalid config at ${globalConfigPath}. A backup will be created before replacement.`,
+    `Type REWRITE to confirm normalized rewrite of invalid config at ${rewriteTarget}${detailsText ? ` (${detailsText})` : ""}. A backup will be created before replacement.`,
   );
   const rewrite = await normalizeRewriteInvalidConfig({
-    configPath: globalConfigPath,
+    configPath: rewriteTarget,
     confirmed: confirmation === "REWRITE",
   });
   const combinedText = rewrite.rewritten
@@ -326,9 +354,10 @@ async function maybeRunInteractiveModelSelection(args: {
   const initialConfigError = args.report.checks.find(
     (check) => check.name === "config" && check.status === "error",
   );
+  const invalidConfigDetailsSummary = invalidConfigDetailsText(repairArgs.report);
   const selectedAction = await args.ctx.ui.select(
     initialConfigError
-      ? "Choose explicit repair choices for invalid config before any Doctor Repair Flow mutation."
+      ? `Choose explicit repair choices for invalid config before any Doctor Repair Flow mutation${invalidConfigDetailsSummary ? ` (${invalidConfigDetailsSummary})` : ""}.`
       : "Choose a Lambda-RLM Doctor Repair Flow action after diagnostics.",
     args.menu.actions,
     args.menu.defaultActionId,

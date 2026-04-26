@@ -852,6 +852,9 @@ describe("lambda_rlm Pi extension registration", () => {
     });
 
     expect(prompts[0]).toContain("Type REWRITE");
+    expect(prompts[0]).toContain("code=invalid_toml");
+    expect(prompts[0]).toContain("field=line 2");
+    expect(prompts[0]).toContain(`path=${configPath}`);
     const details = result.details as { invalidConfigRepair?: { backupPath?: string } };
     const backupPath = details.invalidConfigRepair?.backupPath;
     expect(backupPath).toContain("config.toml.invalid.");
@@ -863,6 +866,83 @@ describe("lambda_rlm Pi extension registration", () => {
       '# model = "<provider>/<model-id>"',
     );
     expect(firstContentText(result)).toContain("confirmed normalized rewrite");
+  });
+
+  it("rewrites the exact invalid project config without changing a valid global config", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-project-invalid-rewrite-"));
+    const workspacePath = join(root, "home", ".pi", "lambda-rlm");
+    const globalConfigPath = join(workspacePath, "config.toml");
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const globalConfig = '[leaf]\nmodel = "global/valid"\n';
+    const invalidProjectConfig = `[leaf]\nmodel = `;
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(globalConfigPath, globalConfig, "utf-8");
+    await writeFile(projectConfigPath, invalidProjectConfig, "utf-8");
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        promptText: () => "REWRITE",
+        select: () => "rewrite_invalid_config_normalized",
+      },
+    });
+
+    await expect(readFile(globalConfigPath, "utf-8")).resolves.toBe(globalConfig);
+    await expect(readFile(projectConfigPath, "utf-8")).resolves.toContain(
+      '# model = "<provider>/<model-id>"',
+    );
+    const details = result.details as {
+      invalidConfigRepair?: { backupPath?: string; configPath?: string };
+    };
+    expect(details.invalidConfigRepair?.configPath).toBe(projectConfigPath);
+    if (!details.invalidConfigRepair?.backupPath) {
+      throw new Error("expected invalid project config backup path");
+    }
+    await expect(readFile(details.invalidConfigRepair.backupPath, "utf-8")).resolves.toBe(
+      invalidProjectConfig,
+    );
+  });
+
+  it("shows invalid config details before rewrite confirmation and before any file write", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-invalid-call-order-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const configPath = join(workspacePath, "config.toml");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const invalidConfig = `[leaf]\nmodel = `;
+    await writeFile(configPath, invalidConfig, "utf-8");
+    const events: string[] = [];
+
+    await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        promptText: async (prompt) => {
+          events.push(`confirm:${prompt}`);
+          await expect(readFile(configPath, "utf-8")).resolves.toBe(invalidConfig);
+          return "REWRITE";
+        },
+        select: (prompt) => {
+          events.push(`select:${prompt}`);
+          expect(prompt).toContain("code=invalid_toml");
+          expect(prompt).toContain("field=line 2");
+          expect(prompt).toContain("source=global");
+          expect(prompt).toContain(`path=${configPath}`);
+          return "rewrite_invalid_config_normalized";
+        },
+      },
+    });
+
+    expect(events[0]).toMatch(/^select:/);
+    expect(events[1]).toMatch(/^confirm:/);
+    expect(events[1]).toContain("code=invalid_toml");
+    expect(events[1]).toContain("field=line 2");
+    expect(events[1]).toContain("source=global");
+    expect(events[1]).toContain(`path=${configPath}`);
+    await expect(readFile(configPath, "utf-8")).resolves.toContain(
+      '# model = "<provider>/<model-id>"',
+    );
   });
 
   it("loads the Pi extension entrypoint and registers the lambda_rlm tool", () => {

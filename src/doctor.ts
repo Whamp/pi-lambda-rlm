@@ -288,7 +288,12 @@ async function configCheck(options: DoctorOptions, cwd: string) {
     "config",
     "error",
     configResult.error.message,
-    { code: configResult.error.code, field: configResult.error.field },
+    {
+      code: configResult.error.code,
+      field: configResult.error.field,
+      ...(configResult.error.source ? { source: configResult.error.source } : {}),
+      ...(configResult.error.path ? { path: configResult.error.path } : {}),
+    },
     "Fix ~/.pi/lambda-rlm/config.toml or <project>/.pi/lambda-rlm/config.toml; use [leaf] string keys and positive integer [run] keys only.",
   );
 }
@@ -399,7 +404,12 @@ async function leafModelCheck(options: DoctorOptions, cwd: string) {
       "leaf_model",
       "error",
       "Formal Leaf model could not be checked because TOML configuration is invalid.",
-      { code: configResult.error.code, field: configResult.error.field },
+      {
+        code: configResult.error.code,
+        field: configResult.error.field,
+        ...(configResult.error.source ? { source: configResult.error.source } : {}),
+        ...(configResult.error.path ? { path: configResult.error.path } : {}),
+      },
       "Fix ~/.pi/lambda-rlm/config.toml or <project>/.pi/lambda-rlm/config.toml, then rerun /lambda-rlm-doctor.",
     );
   }
@@ -630,7 +640,14 @@ function diagnosticLine(checkEntry: DoctorCheck) {
   const details = checkEntry.details ?? {};
   const field = typeof details.field === "string" ? details.field : undefined;
   const code = typeof details.code === "string" ? details.code : undefined;
-  const detailSuffix = [code ? `code=${code}` : undefined, field ? `field=${field}` : undefined]
+  const source = typeof details.source === "string" ? details.source : undefined;
+  const path = typeof details.path === "string" ? details.path : undefined;
+  const detailSuffix = [
+    code ? `code=${code}` : undefined,
+    field ? `field=${field}` : undefined,
+    source ? `source=${source}` : undefined,
+    path ? `path=${path}` : undefined,
+  ]
     .filter(Boolean)
     .join(", ");
   return `- [${checkEntry.status}] ${checkEntry.name}: ${checkEntry.message}${detailSuffix ? ` (${detailSuffix})` : ""}`;
