@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -78,6 +78,48 @@ const missingSeamsRunner: ProcessRunner = (invocation) => {
 };
 
 describe("lambda_rlm doctor diagnostics", () => {
+  it("defensively runs Workspace Scaffolding without notifying or overwriting before diagnostics", async () => {
+    const root = await tempDir();
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    await mkdir(workspacePath, { recursive: true });
+    await writeFile(join(workspacePath, "config.toml"), "# user config\n", "utf-8");
+
+    await runLambdaRlmDoctor({
+      cwd: root,
+      processRunner: okRunner,
+      workspacePath,
+      mockBridgeRunner: () => ({ details: {}, message: "mock ok", ok: true }),
+    });
+
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toBe(
+      "# user config\n",
+    );
+    await expect(readFile(join(workspacePath, "README.md"), "utf-8")).resolves.toContain(
+      "Lambda-RLM User Workspace",
+    );
+  });
+
+  it("uses homeDir to derive the doctor scaffold workspace when workspacePath is not provided", async () => {
+    const root = await tempDir();
+    const homeDir = join(root, "home");
+    const expectedWorkspacePath = join(homeDir, ".pi", "lambda-rlm");
+
+    await runLambdaRlmDoctor({
+      cwd: root,
+      env: {},
+      homeDir,
+      mockBridgeRunner: () => ({ details: {}, message: "mock ok", ok: true }),
+      processRunner: okRunner,
+    });
+
+    await expect(readFile(join(expectedWorkspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      '# model = "<provider>/<model-id>"',
+    );
+    await expect(readFile(join(expectedWorkspacePath, "README.md"), "utf-8")).resolves.toContain(
+      "Add a `[leaf].model` entry manually",
+    );
+  });
+
   it("reports an actionable error for invalid resolved TOML configuration", async () => {
     const root = await tempDir();
     const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");

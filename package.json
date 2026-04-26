@@ -10,6 +10,7 @@
   "files": [
     "README.md",
     "src/",
+    "examples/",
     ".pi/extensions/lambda-rlm/index.ts",
     ".pi/extensions/lambda-rlm/bridge.py",
     ".pi/extensions/lambda-rlm/prompts/",

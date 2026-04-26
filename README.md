@@ -2,7 +2,7 @@
 
 `lambda_rlm` is an **agent-invoked Pi tool** for asking questions over files that are too large, too numerous, or too awkward to paste into the parent agent conversation.
 
-Beginner version: install the Pi package, choose a child Pi model in `~/.pi/lambda-rlm/config.toml`, run `/lambda-rlm-doctor`, then ask Pi a question that references one or more file paths. The agent decides when calling `lambda_rlm` is better than reading those files directly.
+Beginner version: install the Pi package, restart or `/reload` Pi so extension load creates the **Lambda-RLM User Workspace** at `~/.pi/lambda-rlm/`, add `[leaf].model` manually using a model that already works in Pi, run `/lambda-rlm-doctor` to validate setup, then ask Pi a question that references one or more file paths. The agent decides when calling `lambda_rlm` is better than reading those files directly.
 
 It is **not a provider or benchmark harness**. It is also not something most users call by hand. It is a Pi extension tool that protects the parent agent context budget by doing long-context file work behind a tool boundary.
 
@@ -32,36 +32,42 @@ After installing, start a new Pi session or run:
 /reload
 ```
 
-### 2. Choose the Formal Leaf model
+### 2. Inspect the Lambda-RLM User Workspace
 
-`lambda_rlm` services Lambda-RLM model callbacks by spawning constrained child Pi processes. Those child calls need an explicit Pi model.
+When the extension loads after install, Workspace Scaffolding creates `~/.pi/lambda-rlm/` if it is missing and shows a one-time Scaffold Notification. The scaffold is non-destructive: existing `config.toml`, `README.md`, Copied Example Fixtures, and prompt overlays are never overwritten.
 
-Create `~/.pi/lambda-rlm/config.toml`:
+The generated `config.toml` is a Transparent Sparse Config Scaffold. It is valid TOML before model setup, keeps the Formal Leaf model commented so no billable model is auto-selected, and documents Run Control Policy defaults as comments instead of active copied overrides:
 
-```bash
-mkdir -p ~/.pi/lambda-rlm
-cat > ~/.pi/lambda-rlm/config.toml <<'EOF'
+```toml
 [leaf]
-# Use an exact model accepted by `pi --model`, normally <provider>/<model-id>.
-model = "google/gemini-3-flash-preview"
-
-# Optional. Defaults shown.
+# Add a Formal Leaf model manually before real Lambda-RLM runs.
+# Use a model accepted by Pi, for example: model = "<provider>/<model-id>"
+# model = "<provider>/<model-id>"
 thinking = "off"
 pi_executable = "pi"
 
 [run]
-# Optional run controls. Defaults shown.
-max_input_bytes = 1200000
-output_max_bytes = 51200
-output_max_lines = 2000
-max_model_calls = 1000
-whole_run_timeout_ms = 300000
-model_call_timeout_ms = 60000
-model_process_concurrency = 2
-EOF
+# Built-in Run Control Policy defaults are documented here as comments.
+# Uncomment only values you intentionally want to override.
+# max_input_bytes = 1200000
+# output_max_bytes = 51200
+# output_max_lines = 2000
+# max_model_calls = 1000
+# whole_run_timeout_ms = 300000
+# model_call_timeout_ms = 60000
+# model_process_concurrency = 2
 ```
 
-Pick a model that already works in Pi. Useful ways to find one:
+### 3. Configure the Formal Leaf model manually
+
+`lambda_rlm` services Lambda-RLM model callbacks by spawning constrained child Pi processes. Those child calls need an explicit Pi model. Add `[leaf].model` to `~/.pi/lambda-rlm/config.toml` manually using a model that already works in Pi:
+
+```toml
+[leaf]
+model = "<provider>/<model-id>"
+```
+
+Useful ways to find a working model:
 
 ```bash
 pi --list-models
@@ -69,7 +75,7 @@ pi --list-models
 
 or open `/model` inside Pi.
 
-### 3. Make sure Pi can authenticate that model
+### 4. Make sure Pi can authenticate that model
 
 For built-in cloud providers, use `/login` in Pi or set the provider API key. Pi stores credentials in `~/.pi/agent/auth.json`.
 
@@ -103,7 +109,7 @@ Then use:
 model = "local-vllm/qwen3-coder"
 ```
 
-### 4. Run the doctor
+### 5. Run the doctor
 
 Inside Pi:
 
@@ -111,7 +117,7 @@ Inside Pi:
 /lambda-rlm-doctor
 ```
 
-The doctor is non-mutating. It checks:
+The doctor defensively reruns Workspace Scaffolding to restore missing onboarding files without overwriting user-owned files, then checks:
 
 - Python availability;
 - vendored Lambda-RLM importability and local fork seams;
@@ -124,7 +130,7 @@ The doctor is non-mutating. It checks:
 
 If the doctor reports a `leaf_model` error, fix `[leaf].model`, Pi credentials, or `~/.pi/agent/models.json`, then rerun it.
 
-### 5. Use it naturally
+### 6. Use it naturally
 
 Ask Pi questions like:
 

@@ -1,3 +1,4 @@
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   FORMAL_LEAF_READ_ONLY_TOOLS,
@@ -8,6 +9,7 @@ import type { Awaitable, ProcessRunner } from "./leaf-runner.js";
 import { resolvePromptBundle } from "./prompt-resolver.js";
 import { resolveLambdaRlmConfig } from "./config-resolver.js";
 import { runSyntheticBridge } from "./bridge-runner.js";
+import { ensureLambdaRlmUserWorkspace } from "./workspace-scaffolding.js";
 
 export type DoctorStatus = "ok" | "warn" | "error";
 
@@ -48,6 +50,7 @@ export interface DoctorOptions {
   projectPromptDir?: string;
   bridgePath?: string;
   mockBridgeRunner?: () => Awaitable<MockBridgeResult>;
+  workspacePath?: string;
 }
 
 function check(
@@ -454,7 +457,25 @@ async function mockBridgeCheck(
   );
 }
 
+function doctorScaffoldWorkspacePath(options: DoctorOptions) {
+  if (options.workspacePath) {
+    return options.workspacePath;
+  }
+  if (options.globalConfigPath) {
+    return dirname(options.globalConfigPath);
+  }
+  if (options.homeDir) {
+    return join(options.homeDir, ".pi", "lambda-rlm");
+  }
+}
+
 export async function runLambdaRlmDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
+  const scaffoldWorkspacePath = doctorScaffoldWorkspacePath(options);
+  if (process.env.NODE_ENV !== "test" || scaffoldWorkspacePath) {
+    await ensureLambdaRlmUserWorkspace(
+      scaffoldWorkspacePath ? { workspacePath: scaffoldWorkspacePath } : {},
+    );
+  }
   const cwd = options.cwd ?? process.cwd();
   const pythonPath = options.pythonPath ?? "python3";
   const piExecutable = await piExecutableForDoctor(options, cwd);
