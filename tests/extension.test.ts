@@ -1063,6 +1063,190 @@ describe("lambda_rlm Pi extension registration", () => {
     );
   });
 
+  it("blocks the explicit real Formal Leaf smoke test when the initial doctor report has invalid config", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-invalid-smoke-flow-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const invalidConfig = `[leaf]\nmodel = `;
+    await writeFile(join(workspacePath, "config.toml"), invalidConfig, "utf-8");
+    const prompts: string[] = [];
+    const childPiCalls: ProcessInvocation[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: (invocation) => {
+        if (invocation.command === "pi" && !invocation.args.includes("--version")) {
+          childPiCalls.push(invocation);
+        }
+        return okDoctorRunner(invocation);
+      },
+      ui: {
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "RUN";
+        },
+        select: () => "run_real_formal_leaf_smoke_test",
+      },
+    });
+
+    const text = firstContentText(result);
+    expect(text).toContain("real Formal Leaf smoke test was not started");
+    expect(text).toContain("initial diagnostics reported invalid Lambda-RLM configuration");
+    expect(prompts).toStrictEqual([]);
+    expect(childPiCalls).toStrictEqual([]);
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toBe(
+      invalidConfig,
+    );
+    expect(result.details).toMatchObject({
+      blockedAction: {
+        id: "run_real_formal_leaf_smoke_test",
+        reason: "initial_config_error",
+      },
+    });
+    expect(result.details).not.toHaveProperty("realFormalLeafSmokeTest");
+    expect(result.details).not.toHaveProperty("modelWrite");
+    expect(result.details).not.toHaveProperty("rerun");
+  });
+
+  it("cancels the explicit real Formal Leaf smoke test after the cost/rate-limit warning without calling child Pi", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-smoke-cancel-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    await mkdir(workspacePath, { recursive: true });
+    await writeFile(
+      join(workspacePath, "config.toml"),
+      '[leaf]\nmodel = "provider/smoke"\nthinking = "low"\n',
+      "utf-8",
+    );
+    const prompts: string[] = [];
+    const childPiCalls: ProcessInvocation[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: (invocation) => {
+        if (invocation.command === "pi" && !invocation.args.includes("--version")) {
+          childPiCalls.push(invocation);
+        }
+        return okDoctorRunner(invocation);
+      },
+      ui: {
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "no";
+        },
+        select: () => "run_real_formal_leaf_smoke_test",
+      },
+    });
+
+    expect(prompts[0]).toContain("real Formal Leaf smoke test");
+    expect(prompts[0]).toContain("may spend model credits or rate limits");
+    expect(childPiCalls).toStrictEqual([]);
+    expect(firstContentText(result)).toContain("real Formal Leaf smoke test was cancelled");
+    expect(result.details).toMatchObject({
+      realFormalLeafSmokeTest: { ok: false, status: "cancelled" },
+    });
+  });
+
+  it("runs the explicit real Formal Leaf smoke test with the configured model and current Formal Leaf constraints", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-smoke-success-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    await mkdir(workspacePath, { recursive: true });
+    await writeFile(
+      join(workspacePath, "config.toml"),
+      '[leaf]\nmodel = "provider/smoke"\nthinking = "minimal"\npi_executable = "pi-smoke"\n',
+      "utf-8",
+    );
+    const childPiCalls: ProcessInvocation[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: async (invocation) => {
+        if (invocation.command === "python3" || invocation.args.includes("--version")) {
+          return okDoctorRunner(invocation);
+        }
+        childPiCalls.push(invocation);
+        const promptFile = invocation.args.at(-1);
+        const prompt = promptFile?.startsWith("@")
+          ? await readFile(promptFile.slice(1), "utf-8")
+          : "";
+        expect(prompt).toContain("real Formal Leaf smoke test");
+        return { exitCode: 0, stderr: "", stdout: "SMOKE_OK\n" };
+      },
+      ui: {
+        promptText: () => "RUN",
+        select: () => "run_real_formal_leaf_smoke_test",
+      },
+    });
+
+    expect(childPiCalls).toHaveLength(1);
+    const [childPiCall] = childPiCalls;
+    if (!childPiCall) {
+      throw new Error("expected one child Pi smoke test invocation");
+    }
+    expect(childPiCall).toMatchObject({ command: "pi-smoke" });
+    expect(childPiCall.args).toStrictEqual(expect.arrayContaining(["--model", "provider/smoke"]));
+    expect(childPiCall.args).toStrictEqual(expect.arrayContaining(["--thinking", "minimal"]));
+    expect(childPiCall.args).toStrictEqual(
+      expect.arrayContaining([
+        "--tools",
+        "read,grep,find,ls",
+        "--no-extensions",
+        "--no-skills",
+        "--no-context-files",
+        "--no-prompt-templates",
+        "--no-session",
+      ]),
+    );
+    expect(firstContentText(result)).toContain("real Formal Leaf smoke test succeeded");
+    expect(firstContentText(result)).toMatch(
+      /normal Doctor Command readiness semantics are unchanged/i,
+    );
+    expect(result.details).toMatchObject({
+      ok: true,
+      realFormalLeafSmokeTest: { leafModel: "provider/smoke", ok: true, status: "succeeded" },
+    });
+  });
+
+  it("reports explicit real Formal Leaf smoke test failures without changing doctor readiness", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-smoke-failure-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    await mkdir(workspacePath, { recursive: true });
+    await writeFile(
+      join(workspacePath, "config.toml"),
+      '[leaf]\nmodel = "provider/smoke"\n',
+      "utf-8",
+    );
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: (invocation) => {
+        if (invocation.command === "python3" || invocation.args.includes("--version")) {
+          return okDoctorRunner(invocation);
+        }
+        return { exitCode: 42, stderr: "provider denied", stdout: "" };
+      },
+      ui: {
+        promptText: () => "RUN",
+        select: () => "run_real_formal_leaf_smoke_test",
+      },
+    });
+
+    expect(firstContentText(result)).toContain("real Formal Leaf smoke test failed");
+    expect(firstContentText(result)).toMatch(
+      /normal Doctor Command readiness semantics are unchanged/i,
+    );
+    expect(result.details).toMatchObject({
+      ok: true,
+      realFormalLeafSmokeTest: {
+        ok: false,
+        status: "failed",
+        error: expect.objectContaining({ code: "child_exit_nonzero" }),
+      },
+    });
+  });
+
   it("loads the Pi extension entrypoint and registers the lambda_rlm tool", () => {
     const tool = registeredLambdaRlmTool(registerLambdaRlmEntrypoint);
 

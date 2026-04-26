@@ -18,6 +18,7 @@ import {
   writeFormalLeafThinkingSelection,
 } from "./targeted-config-edit.js";
 import { ensureLambdaRlmUserWorkspace } from "./workspace-scaffolding.js";
+import { LeafProcessFailureError, runFormalPiLeafModelCall } from "./leaf-runner.js";
 import type { ProcessRunner } from "./leaf-runner.js";
 import type { ModelCallConcurrencyQueue } from "./model-call-queue.js";
 
@@ -379,6 +380,22 @@ async function blockUnsafeModelSelection(args: InteractiveRepairArgs) {
   };
 }
 
+async function blockUnsafeRealFormalLeafSmokeTest(args: InteractiveRepairArgs) {
+  const combinedText = `${args.initialText}\n\nThe real Formal Leaf smoke test was not started because initial diagnostics reported invalid Lambda-RLM configuration. Fix the TOML/config error first, then rerun /lambda-rlm-doctor.`;
+  await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+  return {
+    content: [{ text: combinedText, type: "text" }],
+    details: {
+      ...args.report,
+      actions: args.menu,
+      blockedAction: {
+        id: "run_real_formal_leaf_smoke_test",
+        reason: "initial_config_error",
+      },
+    },
+  };
+}
+
 async function runInteractiveThinkingSelection(args: InteractiveRepairArgs) {
   const thinking = await chooseFormalLeafThinking(args.ctx);
   if (!thinking) {
@@ -415,6 +432,111 @@ async function runInteractiveThinkingSelection(args: InteractiveRepairArgs) {
       thinkingWrite: { ...thinkingWrite, target: selectedTarget },
     },
   };
+}
+
+async function runInteractiveRealFormalLeafSmokeTest(args: InteractiveRepairArgs) {
+  const confirmation = await args.ctx.ui?.promptText?.(
+    "Run real Formal Leaf smoke test? This explicit action will start one Constrained Pi Leaf Call using the configured Formal Leaf model and current leaf command constraints. It may spend model credits or rate limits. Type RUN to continue, or anything else to cancel.",
+  );
+  if (confirmation !== "RUN") {
+    const combinedText = `${args.initialText}\n\nThe real Formal Leaf smoke test was cancelled. No child Pi model call was started and Normal Doctor Command readiness semantics are unchanged.`;
+    await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+    return {
+      content: [{ text: combinedText, type: "text" }],
+      details: {
+        ...args.report,
+        actions: args.menu,
+        realFormalLeafSmokeTest: { ok: false, status: "cancelled" },
+      },
+    };
+  }
+
+  const cwd = args.ctx.cwd ?? process.cwd();
+  const configResult = await resolveLambdaRlmConfigWithSources({
+    ...args.doctorOptions,
+    cwd,
+  });
+  if (!configResult.ok) {
+    const combinedText = `${args.initialText}\n\nThe real Formal Leaf smoke test failed before starting because Lambda-RLM configuration could not be resolved. Fix config and rerun /lambda-rlm-doctor. Normal Doctor Command readiness semantics are unchanged.`;
+    return {
+      content: [{ text: combinedText, type: "text" }],
+      details: {
+        ...args.report,
+        actions: args.menu,
+        realFormalLeafSmokeTest: {
+          error: configResult.error,
+          ok: false,
+          status: "failed_before_start",
+        },
+      },
+    };
+  }
+  const { leaf, run } = configResult.config.config;
+  if (!leaf.model) {
+    const combinedText = `${args.initialText}\n\nThe real Formal Leaf smoke test failed before starting because no Formal Leaf model is configured. Choose a Formal Leaf model first. Normal Doctor Command readiness semantics are unchanged.`;
+    return {
+      content: [{ text: combinedText, type: "text" }],
+      details: {
+        ...args.report,
+        actions: args.menu,
+        realFormalLeafSmokeTest: { ok: false, status: "failed_before_start" },
+      },
+    };
+  }
+
+  try {
+    const smoke = await runFormalPiLeafModelCall(
+      {
+        prompt:
+          "real Formal Leaf smoke test: reply exactly with SMOKE_OK. This verifies the configured Formal Leaf model through the current Formal Leaf Profile constraints.",
+        requestId: "real-formal-leaf-smoke-test",
+      },
+      {
+        leafModel: leaf.model,
+        leafThinking: leaf.thinking,
+        piExecutable: leaf.piExecutable,
+        ...(args.doctorOptions.processRunner
+          ? { processRunner: args.doctorOptions.processRunner }
+          : {}),
+        timeoutMs: run.modelCallTimeoutMs,
+      },
+    );
+    const combinedText = `${args.initialText}\n\nThe real Formal Leaf smoke test succeeded using Formal Leaf model ${leaf.model}. Child Pi stdout: ${smoke.content || "<empty>"}. Normal Doctor Command readiness semantics are unchanged; this opt-in smoke test does not replace default doctor diagnostics.`;
+    await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+    return {
+      content: [{ text: combinedText, type: "text" }],
+      details: {
+        ...args.report,
+        actions: args.menu,
+        realFormalLeafSmokeTest: {
+          diagnostics: smoke.diagnostics,
+          leafModel: leaf.model,
+          ok: true,
+          status: "succeeded",
+        },
+      },
+    };
+  } catch (error) {
+    const failure =
+      error instanceof LeafProcessFailureError
+        ? error.details
+        : { error: { code: "unknown", message: String(error), type: "child_process" } };
+    const combinedText = `${args.initialText}\n\nThe real Formal Leaf smoke test failed using Formal Leaf model ${leaf.model}. Normal Doctor Command readiness semantics are unchanged; default diagnostics remain based on the non-spending mock bridge check.`;
+    await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+    return {
+      content: [{ text: combinedText, type: "text" }],
+      details: {
+        ...args.report,
+        actions: args.menu,
+        realFormalLeafSmokeTest: {
+          ...failure,
+          leafModel: leaf.model,
+          ok: false,
+          status: "failed",
+        },
+      },
+    };
+  }
 }
 
 async function runInteractiveModelSelection(args: InteractiveRepairArgs) {
@@ -494,6 +616,11 @@ async function maybeRunInteractiveModelSelection(args: {
     return initialConfigError
       ? blockUnsafeThinkingSelection(repairArgs)
       : runInteractiveThinkingSelection(repairArgs);
+  }
+  if (selectedAction === "run_real_formal_leaf_smoke_test") {
+    return initialConfigError
+      ? blockUnsafeRealFormalLeafSmokeTest(repairArgs)
+      : runInteractiveRealFormalLeafSmokeTest(repairArgs);
   }
   if (selectedAction !== "select_formal_leaf_model") {
     return;

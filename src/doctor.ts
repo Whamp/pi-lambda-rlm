@@ -31,6 +31,7 @@ export type DoctorActionId =
   | "select_formal_leaf_model"
   | "keep_current_configuration"
   | "change_formal_leaf_thinking"
+  | "run_real_formal_leaf_smoke_test"
   | "show_config_paths"
   | "cancel_invalid_config_repair"
   | "rewrite_invalid_config_normalized";
@@ -620,6 +621,14 @@ export function buildDoctorActionMenu(report: DoctorReport): DoctorActionMenu {
       safeDefault: false,
     },
     {
+      description:
+        "Run an explicit real Formal Leaf smoke test through one Constrained Pi Leaf Call. Warning: this may spend model credits or rate limits and is not part of normal Doctor Command readiness semantics.",
+      id: "run_real_formal_leaf_smoke_test",
+      label: "Run real Formal Leaf smoke test",
+      recommended: false,
+      safeDefault: false,
+    },
+    {
       description: "Show global/project configuration paths and source precedence.",
       id: "show_config_paths",
       label: "Show config paths and precedence",
@@ -733,7 +742,7 @@ export function renderDoctorCommandOutput(
         action.safeDefault ? "safe default" : undefined,
       ].filter(Boolean);
       lines.push(
-        `- ${action.id}${badges.length > 0 ? ` (${badges.join(", ")})` : ""}: ${action.label}`,
+        `- ${action.id}${badges.length > 0 ? ` (${badges.join(", ")})` : ""}: ${action.label} — ${action.description}`,
       );
     }
     lines.push(`Default action: ${menu.defaultActionId}`);
