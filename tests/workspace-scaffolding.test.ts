@@ -60,11 +60,11 @@ describe("Lambda-RLM User Workspace Scaffolding", () => {
     });
 
     const workspaceReadme = await read(join(workspacePath, "README.md"));
-    expect(workspaceReadme).toContain("/lambda-rlm-doctor");
-    expect(workspaceReadme).toContain("Add a `[leaf].model` entry manually");
-    expect(workspaceReadme).not.toMatch(
-      /doctor (chooses|offers setup|writes)|model picker|model selection/i,
-    );
+    expect(workspaceReadme).toContain("Run `/lambda-rlm-doctor` first");
+    expect(workspaceReadme).toContain("Formal Leaf Model Selection");
+    expect(workspaceReadme).toContain("diagnostics");
+    expect(workspaceReadme).toContain("Manually edit `[leaf].model` only as a fallback");
+    expect(workspaceReadme).toContain("non-interactive or diagnostic-only contexts");
     await expect(
       read(join(workspacePath, "examples", "multi-file-qa", "README.md")),
     ).resolves.toContain("Multi-file QA");

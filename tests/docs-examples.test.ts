@@ -25,6 +25,12 @@ describe("operator docs and examples", () => {
     expect(readme).toContain('model = "');
     expect(readme).toContain("Configuration Write Target");
     expect(readme).toContain("Project Tool Configuration");
+    expect(readme).toContain(
+      "Formal Leaf Thinking Selection uses the same Configuration Write Target prompt",
+    );
+    expect(readme).toContain(
+      "highlighted default matches the effective owner of `[leaf].thinking`",
+    );
     expect(readme).toContain("~/.pi/agent/models.json");
     expect(readme).toContain("~/.pi/agent/auth.json");
     expect(readme).toContain("/login");
@@ -42,6 +48,10 @@ describe("operator docs and examples", () => {
     expect(readme).toContain("[run]");
     expect(readme).toContain("Prompt overlays");
     expect(readme).toContain("manual copy only");
+    expect(readme).toContain(
+      "Model/config setup validation failures point to `/lambda-rlm-doctor`",
+    );
+    expect(readme).not.toContain("Tool validation failures also point there");
     expect(readme).toContain("Development notes");
     expect(readme).toContain("npm test");
     expect(readme).not.toContain(".env.example");

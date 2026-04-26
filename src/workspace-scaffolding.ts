@@ -44,15 +44,14 @@ This directory is the global Lambda-RLM User Workspace. Workspace Scaffolding cr
 
 Next steps:
 
-1. Inspect or edit \`config.toml\` and the Copied Example Fixtures under \`examples/\`.
-2. Add a \`[leaf].model\` entry manually before real Lambda-RLM runs, using a model that already works in Pi:
+1. Inspect \`config.toml\` and the Copied Example Fixtures under \`examples/\`.
+2. Run \`/lambda-rlm-doctor\` first in Pi. It validates setup and, after diagnostics, can offer Formal Leaf Model Selection for entering a manual \`provider/model-id\` value.
+3. Manually edit \`[leaf].model\` only as a fallback for non-interactive or diagnostic-only contexts, using a model that already works in Pi:
 
    \`\`\`toml
    [leaf]
    model = "<provider>/<model-id>"
    \`\`\`
-
-3. Run \`/lambda-rlm-doctor\` in Pi to validate setup and read any manual remediation it reports.
 
 ## Files
 
