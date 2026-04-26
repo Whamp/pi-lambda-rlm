@@ -39,6 +39,7 @@ interface RegisteredTool {
   name: string;
   parameters: ToolParameters;
   promptGuidelines?: string[];
+  promptSnippet?: string;
 }
 
 interface RegisteredCommand {
@@ -273,6 +274,32 @@ describe("lambda_rlm Pi extension registration", () => {
       type: "object",
     });
     expect(JSON.stringify(tool.parameters)).toContain("exactly one of contextPath or contextPaths");
+    const propertyDescriptions = Object.fromEntries(
+      Object.entries(tool.parameters.properties).map(([key, value]) => [
+        key,
+        (value as { description?: string }).description,
+      ]),
+    );
+    expect(propertyDescriptions).toMatchObject({
+      contextPath:
+        "Path to one readable UTF-8 text file. Pass exactly one of contextPath or contextPaths. lambda_rlm reads this file internally to preserve parent-agent context; do not inline file contents.",
+      contextPaths:
+        "Ordered paths to readable UTF-8 text files for one consolidated Lambda-RLM run. Pass exactly one of contextPath or contextPaths; do not inline, paste, or concatenate file contents yourself.",
+      maxInputBytes:
+        "Caps the total UTF-8 bytes read from all referenced context files for this run. Advanced tightening only; cannot exceed the resolved config limit. Omit unless debugging or retrying after an input-limit failure.",
+      maxModelCalls:
+        "Caps Lambda-RLM model callbacks for this run, including task detection, filters, leaf answers, and reducers. Advanced tightening only; cannot exceed the resolved config limit. Omit unless debugging or retrying after a model-call-limit failure.",
+      modelCallTimeoutMs:
+        "Caps the duration of each individual Formal Leaf model callback in milliseconds. Advanced tightening only; cannot exceed the resolved config limit. Omit unless debugging or retrying after a model-call timeout.",
+      outputMaxBytes:
+        "Caps chat-visible answer bytes for this run; does not cap or return source file contents. Advanced tightening only; cannot exceed the resolved config limit. Omit unless the user asks for a compact answer or you are debugging output limits.",
+      outputMaxLines:
+        "Caps chat-visible answer lines for this run; does not cap or return source file contents. Advanced tightening only; cannot exceed the resolved config limit. Omit unless the user asks for a compact answer or you are debugging output limits.",
+      question:
+        "Question or task instruction to answer from the referenced text file(s), such as QA, summary, extraction, synthesis, analysis, or diagnosis.",
+      wholeRunTimeoutMs:
+        "Caps total wall-clock time for the whole Lambda-RLM run in milliseconds. Advanced tightening only; cannot exceed the resolved config limit. Omit unless debugging or retrying after a whole-run timeout.",
+    });
     expect(sortedStrings(Object.keys(tool.parameters.properties))).toStrictEqual([
       "contextPath",
       "contextPaths",
@@ -308,7 +335,7 @@ describe("lambda_rlm Pi extension registration", () => {
     expect(incompatibleSchemas).toStrictEqual([]);
   });
 
-  it("describes the public tool as the real path-based Lambda-RLM integration", async () => {
+  it("describes the public tool by long-context use case and context-avoidance boundaries", async () => {
     const tool = registeredLambdaRlmTool();
     const updates: ToolUpdate[] = [];
 
@@ -320,20 +347,35 @@ describe("lambda_rlm Pi extension registration", () => {
       { cwd: process.cwd() },
     );
 
+    expect(tool.description).toBe(
+      "Use lambda_rlm for long-context reasoning over one or more readable text files by path when reading them directly would waste or overflow the parent agent context. Good fits include long-file QA, summarization, extraction, synthesis, and diagnosis over large logs, docs, notes, CSV/JSONL exports, session files, or multi-file code/research context. It returns a bounded answer, not source dumps or citation packs.",
+    );
+    expect(tool.promptSnippet).toBe(
+      "Reason over large readable text files by path without loading them into parent-agent context",
+    );
+    expect(tool.promptGuidelines).toStrictEqual([
+      "Use lambda_rlm when the task requires long-context reasoning over one or more readable text files by path, especially for answering questions, summarizing, extracting facts, synthesizing across files, analyzing, or diagnosing from context that would waste or overflow parent-agent context if read directly.",
+      "Call lambda_rlm with exactly one of contextPath or contextPaths plus question. Pass paths to readable text files only; do not pass inline source text, raw prompts, pasted file contents, URLs, or directories directly. Convert or pack other sources into readable text files first.",
+      "Treat lambda_rlm as an Agent Context Avoidance boundary: it reads source files internally and returns a bounded answer rather than the source corpus.",
+      "Expect a bounded answer plus compact run metadata. Do not ask lambda_rlm to return full source contents, large evidence packs, full execution traces, or citation dumps by default.",
+      "If exact source verification is needed after lambda_rlm answers, use normal narrow follow-up tools such as read or rg on specific files or terms. Do not ask lambda_rlm to dump broad supporting context.",
+      "Advanced run-control parameters are for explicit debugging, diagnostics, or retrying after a limit-related failure. Omit them during normal calls.",
+    ]);
+
     const publicMetadataText = JSON.stringify({
       description: tool.description,
       onUpdate: updates.flatMap((update) => update.content.map((content) => content.text)),
       promptGuidelines: tool.promptGuidelines,
+      promptSnippet: tool.promptSnippet,
     });
 
     expect(publicMetadataText).not.toMatch(
       /synthetic|fake|tracer|does not run real Lambda-RLM yet/i,
     );
-    expect(publicMetadataText).toMatch(/real Lambda-RLM/i);
-    expect(publicMetadataText).toMatch(/Formal Leaf/i);
-    expect(publicMetadataText).toMatch(/path-based|contextPath/i);
-    expect(publicMetadataText).toMatch(/maxModelCalls|wholeRunTimeoutMs|modelCallTimeoutMs/i);
-    expect(publicMetadataText).toMatch(/per-run tightening/i);
+    expect(publicMetadataText).toMatch(/path|contextPath/i);
+    expect(publicMetadataText).toMatch(/bounded answer/i);
+    expect(publicMetadataText).toMatch(/Agent Context Avoidance|parent-agent context/i);
+    expect(publicMetadataText).toMatch(/not source dumps or citation packs/i);
   });
 
   it("executes through the registered public tool path", async () => {

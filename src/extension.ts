@@ -28,60 +28,61 @@ export const LambdaRlmToolParameters = Type.Object(
       Type.String({
         minLength: 1,
         description:
-          "Path to one UTF-8 text file. Pass exactly one of contextPath or contextPaths. The lambda_rlm tool reads this file internally; do not inline file contents.",
+          "Path to one readable UTF-8 text file. Pass exactly one of contextPath or contextPaths. lambda_rlm reads this file internally to preserve parent-agent context; do not inline file contents.",
       }),
     ),
     contextPaths: Type.Optional(
       Type.Array(Type.String({ minLength: 1 }), {
         minItems: 1,
         description:
-          "Ordered UTF-8 text file paths for one consolidated Lambda-RLM run. Pass exactly one of contextPath or contextPaths; do not inline file contents.",
+          "Ordered paths to readable UTF-8 text files for one consolidated Lambda-RLM run. Pass exactly one of contextPath or contextPaths; do not inline, paste, or concatenate file contents yourself.",
       }),
     ),
     maxInputBytes: Type.Optional(
       Type.Number({
         minimum: 1,
         description:
-          "Optional per-run tightening for max input bytes; must be less than or equal to the resolved config limit.",
+          "Caps the total UTF-8 bytes read from all referenced context files for this run. Advanced tightening only; cannot exceed the resolved config limit. Omit unless debugging or retrying after an input-limit failure.",
       }),
     ),
     maxModelCalls: Type.Optional(
       Type.Number({
         minimum: 1,
         description:
-          "Optional per-run tightening for maximum Formal Leaf model callbacks in this run; must be less than or equal to the resolved config limit.",
+          "Caps Lambda-RLM model callbacks for this run, including task detection, filters, leaf answers, and reducers. Advanced tightening only; cannot exceed the resolved config limit. Omit unless debugging or retrying after a model-call-limit failure.",
       }),
     ),
     modelCallTimeoutMs: Type.Optional(
       Type.Number({
         minimum: 1,
         description:
-          "Optional per-run tightening for each Formal Leaf model callback timeout in milliseconds; must be less than or equal to the resolved config limit.",
+          "Caps the duration of each individual Formal Leaf model callback in milliseconds. Advanced tightening only; cannot exceed the resolved config limit. Omit unless debugging or retrying after a model-call timeout.",
       }),
     ),
     outputMaxBytes: Type.Optional(
       Type.Number({
         minimum: 1,
         description:
-          "Optional per-run tightening for visible output bytes; must be less than or equal to the resolved config limit.",
+          "Caps chat-visible answer bytes for this run; does not cap or return source file contents. Advanced tightening only; cannot exceed the resolved config limit. Omit unless the user asks for a compact answer or you are debugging output limits.",
       }),
     ),
     outputMaxLines: Type.Optional(
       Type.Number({
         minimum: 1,
         description:
-          "Optional per-run tightening for visible output lines; must be less than or equal to the resolved config limit.",
+          "Caps chat-visible answer lines for this run; does not cap or return source file contents. Advanced tightening only; cannot exceed the resolved config limit. Omit unless the user asks for a compact answer or you are debugging output limits.",
       }),
     ),
     question: Type.String({
       minLength: 1,
-      description: "Question or instruction to answer using the referenced context file(s).",
+      description:
+        "Question or task instruction to answer from the referenced text file(s), such as QA, summary, extraction, synthesis, analysis, or diagnosis.",
     }),
     wholeRunTimeoutMs: Type.Optional(
       Type.Number({
         minimum: 1,
         description:
-          "Optional per-run tightening for the whole λ-RLM run timeout in milliseconds; must be less than or equal to the resolved config limit.",
+          "Caps total wall-clock time for the whole Lambda-RLM run in milliseconds. Advanced tightening only; cannot exceed the resolved config limit. Omit unless debugging or retrying after a whole-run timeout.",
       }),
     ),
   },
@@ -687,7 +688,7 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
 
   pi.registerTool({
     description:
-      "Runs real vendored Lambda-RLM over one or more path-based context files through the Python NDJSON bridge, using extension-owned Formal Leaf model callbacks and returning a bounded answer.",
+      "Use lambda_rlm for long-context reasoning over one or more readable text files by path when reading them directly would waste or overflow the parent agent context. Good fits include long-file QA, summarization, extraction, synthesis, and diagnosis over large logs, docs, notes, CSV/JSONL exports, session files, or multi-file code/research context. It returns a bounded answer, not source dumps or citation packs.",
     async execute(
       _toolCallId: string,
       params: unknown,
@@ -730,12 +731,14 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
     name: "lambda_rlm",
     parameters: LambdaRlmToolParameters,
     promptGuidelines: [
-      "Use lambda_rlm when a user asks a question over one or more large files by path and ordinary reading would waste parent-agent context.",
-      "Call lambda_rlm with exactly one of contextPath or contextPaths plus question, plus optional per-run tightening limits maxInputBytes/outputMaxBytes/outputMaxLines/maxModelCalls/wholeRunTimeoutMs/modelCallTimeoutMs when needed; do not pass inline context or raw prompts.",
-      "lambda_rlm reads path-based source input internally, assembles contextPaths into a source manifest plus source-delimited context for one consolidated run, runs vendored real Lambda-RLM planning and execution through the Python NDJSON bridge, and services model callbacks with extension-owned Formal Leaf child Pi calls.",
-      "Use maxModelCalls, wholeRunTimeoutMs, and modelCallTimeoutMs only to tighten budgets/deadlines for a single run; they cannot loosen configured defaults.",
-      "Expect a bounded result; the tool should not expose the full source file contents by default.",
+      "Use lambda_rlm when the task requires long-context reasoning over one or more readable text files by path, especially for answering questions, summarizing, extracting facts, synthesizing across files, analyzing, or diagnosing from context that would waste or overflow parent-agent context if read directly.",
+      "Call lambda_rlm with exactly one of contextPath or contextPaths plus question. Pass paths to readable text files only; do not pass inline source text, raw prompts, pasted file contents, URLs, or directories directly. Convert or pack other sources into readable text files first.",
+      "Treat lambda_rlm as an Agent Context Avoidance boundary: it reads source files internally and returns a bounded answer rather than the source corpus.",
+      "Expect a bounded answer plus compact run metadata. Do not ask lambda_rlm to return full source contents, large evidence packs, full execution traces, or citation dumps by default.",
+      "If exact source verification is needed after lambda_rlm answers, use normal narrow follow-up tools such as read or rg on specific files or terms. Do not ask lambda_rlm to dump broad supporting context.",
+      "Advanced run-control parameters are for explicit debugging, diagnostics, or retrying after a limit-related failure. Omit them during normal calls.",
     ],
-    promptSnippet: "Ask a question over referenced context file(s) without inlining file contents",
+    promptSnippet:
+      "Reason over large readable text files by path without loading them into parent-agent context",
   });
 }
