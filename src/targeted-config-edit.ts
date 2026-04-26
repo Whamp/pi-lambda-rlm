@@ -97,8 +97,8 @@ function replaceLineValue(
   const escapedKey = key.replaceAll(/[$()*+.?[\\\]^{|}]/g, "\\$&");
   const pattern = new RegExp(
     commented
-      ? `^(\\s*)#\\s*${escapedKey}\\s*=\\s*(?:"(?:\\\\.|[^"])*"|'[^']*'|[^\\s#]+)(\\s+#.*)?$`
-      : `^(\\s*)${escapedKey}\\s*=\\s*(?:"(?:\\\\.|[^"])*"|'[^']*'|[^\\s#]+)(\\s+#.*)?$`,
+      ? `^(\\s*)#\\s*${escapedKey}\\s*=\\s*(?:"(?:\\\\.|[^"])*"|'[^']*'|[^\\s#]+)((?:\\s*)#.*)?$`
+      : `^(\\s*)${escapedKey}\\s*=\\s*(?:"(?:\\\\.|[^"])*"|'[^']*'|[^\\s#]+)((?:\\s*)#.*)?$`,
   );
   const match = body.match(pattern);
   if (!match) {

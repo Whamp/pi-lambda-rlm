@@ -152,11 +152,13 @@ function defaultProjectConfigPath(cwd: string) {
 
 type ConfigWriteTarget = "global" | "project";
 
-async function selectModelWriteTarget(args: {
+async function selectConfigWriteTarget(args: {
   ctx: MinimalCommandContext;
   doctorOptions: DoctorOptions;
+  effectiveSource: "model" | "thinking";
   globalConfigPath: string;
   projectConfigPath: string;
+  selectionLabel: "Formal Leaf Model Selection" | "Formal Leaf Thinking Selection";
 }): Promise<ConfigWriteTarget | undefined> {
   const targetState = await resolveLambdaRlmConfigWithSources(args);
   if (!targetState.ok) {
@@ -168,9 +170,9 @@ async function selectModelWriteTarget(args: {
     return "global";
   }
   const highlightedTarget =
-    targetState.config.sources.leaf.model === "project" ? "project" : "global";
+    targetState.config.sources.leaf[args.effectiveSource] === "project" ? "project" : "global";
   return args.ctx.ui?.select?.(
-    "Choose the Configuration Write Target for Formal Leaf Model Selection.",
+    `Choose the Configuration Write Target for ${args.selectionLabel}.`,
     [
       {
         id: "global",
@@ -384,18 +386,33 @@ async function runInteractiveThinkingSelection(args: InteractiveRepairArgs) {
   }
   const globalConfigPath =
     globalConfigPathForWorkspace(args.piWorkspacePath) ?? defaultGlobalConfigPath();
+  const projectConfigPath = defaultProjectConfigPath(args.ctx.cwd ?? process.cwd());
+  const selectedTarget = await selectConfigWriteTarget({
+    ctx: args.ctx,
+    doctorOptions: args.doctorOptions,
+    effectiveSource: "thinking",
+    globalConfigPath,
+    projectConfigPath,
+    selectionLabel: "Formal Leaf Thinking Selection",
+  });
+  if (!selectedTarget) {
+    return;
+  }
+  const writeTarget = selectedTarget === "project" ? projectConfigPath : globalConfigPath;
   const thinkingWrite = await writeFormalLeafThinkingSelection({
-    configPath: globalConfigPath,
+    configPath: writeTarget,
     thinking,
   });
-  const combinedText = `${args.initialText}\n\nFormal Leaf Thinking Selection wrote ${thinkingWrite.thinking} to Global Tool Configuration (${thinkingWrite.configPath}) using a Targeted Config Edit (${thinkingWrite.kind}); no automatic full diagnostic rerun was required for this thinking-only change.`;
+  const targetLabel =
+    selectedTarget === "project" ? "Project Tool Configuration" : "Global Tool Configuration";
+  const combinedText = `${args.initialText}\n\nFormal Leaf Thinking Selection wrote ${thinkingWrite.thinking} to ${targetLabel} (${thinkingWrite.configPath}) using a Targeted Config Edit (${thinkingWrite.kind}); no automatic full diagnostic rerun was required for this thinking-only change.`;
   await args.ctx.ui?.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
   return {
     content: [{ text: combinedText, type: "text" }],
     details: {
       ...args.report,
       actions: args.menu,
-      thinkingWrite: { ...thinkingWrite, target: "global" },
+      thinkingWrite: { ...thinkingWrite, target: selectedTarget },
     },
   };
 }
@@ -409,11 +426,13 @@ async function runInteractiveModelSelection(args: InteractiveRepairArgs) {
   const globalConfigPath =
     globalConfigPathForWorkspace(args.piWorkspacePath) ?? defaultGlobalConfigPath();
   const projectConfigPath = defaultProjectConfigPath(args.ctx.cwd ?? process.cwd());
-  const selectedTarget = await selectModelWriteTarget({
+  const selectedTarget = await selectConfigWriteTarget({
     ctx: args.ctx,
     doctorOptions: args.doctorOptions,
+    effectiveSource: "model",
     globalConfigPath,
     projectConfigPath,
+    selectionLabel: "Formal Leaf Model Selection",
   });
   if (!selectedTarget) {
     return;

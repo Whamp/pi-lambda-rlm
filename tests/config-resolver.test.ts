@@ -63,9 +63,25 @@ describe("TOML run config resolver", () => {
         },
         sources: {
           exists: { global: true, project: false },
-          leaf: { model: "global" },
+          leaf: { model: "global", thinking: "default" },
           paths: { global: homeProjectConfigPath, project: homeProjectConfigPath },
         },
+      },
+      ok: true,
+    });
+  });
+
+  it("tracks which config layer owns the effective leaf thinking value", async () => {
+    const dirs = await tempConfigDirs();
+    await writeToml(dirs.globalConfigPath, '[leaf]\nthinking = "low"\n');
+    await writeToml(dirs.projectConfigPath, '[leaf]\nthinking = "high"\n');
+
+    await expect(
+      resolveLambdaRlmConfigWithSources({ cwd: dirs.project, homeDir: dirs.home }),
+    ).resolves.toMatchObject({
+      config: {
+        config: { leaf: { thinking: "high" } },
+        sources: { leaf: { thinking: "project" } },
       },
       ok: true,
     });

@@ -31,6 +31,21 @@ describe("Targeted Config Edit for Formal Leaf Thinking Selection", () => {
     expect(result.kind).toBe("updated_existing_assignment");
   });
 
+  it("updates existing leaf assignments with inline comments that have no preceding whitespace", async () => {
+    const configPath = await tempConfig(
+      `[leaf]\nmodel = "old/provider"# baseline\nthinking = "off"# baseline\n`,
+    );
+
+    const modelResult = await writeFormalLeafModelSelection({ configPath, model: "new/provider" });
+    const thinkingResult = await writeFormalLeafThinkingSelection({ configPath, thinking: "high" });
+
+    await expect(readFile(configPath, "utf-8")).resolves.toBe(
+      `[leaf]\nmodel = "new/provider"# baseline\nthinking = "high"# baseline\n`,
+    );
+    expect(modelResult.kind).toBe("updated_existing_assignment");
+    expect(thinkingResult.kind).toBe("updated_existing_assignment");
+  });
+
   it("uncomments and updates commented scaffold thinking lines", async () => {
     const configPath = await tempConfig(
       `[leaf]\nmodel = "local/qwen"\n# thinking = "off"\npi_executable = "pi"\n`,
