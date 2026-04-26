@@ -320,6 +320,136 @@ describe("lambda_rlm doctor diagnostics", () => {
     );
   });
 
+  it("reports which config source contributes the effective Formal Leaf model", async () => {
+    const root = await tempDir();
+    const globalConfigPath = join(root, "home", ".pi", "lambda-rlm", "config.toml");
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(join(root, "home", ".pi", "lambda-rlm"), { recursive: true });
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(globalConfigPath, '[leaf]\nmodel = "global/model"\n', "utf-8");
+    await writeFile(projectConfigPath, '[leaf]\nmodel = "project/model"\n', "utf-8");
+
+    const report = await runLambdaRlmDoctor({
+      cwd: root,
+      globalConfigPath,
+      mockBridgeRunner: () => ({
+        details: { modelCalls: 2 },
+        message: "mock bridge completed",
+        ok: true,
+      }),
+      processRunner: okRunner,
+      projectConfigPath,
+    });
+
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          leafModel: "project/model",
+          source: "project",
+        }),
+        message: expect.stringContaining("Project Tool Configuration"),
+        name: "leaf_model",
+        status: "ok",
+      }),
+    );
+  });
+
+  it("includes effective global config source metadata on non-exact model registry warnings", async () => {
+    const root = await tempDir();
+    const globalConfigPath = join(root, "home", ".pi", "lambda-rlm", "config.toml");
+    await mkdir(join(root, "home", ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(globalConfigPath, '[leaf]\nmodel = "not-exact"\n', "utf-8");
+
+    const report = await runLambdaRlmDoctor({
+      cwd: root,
+      globalConfigPath,
+      mockBridgeRunner: () => ({ ok: true, message: "mock bridge ok" }),
+      modelRegistry: { find: () => {}, hasConfiguredAuth: () => false },
+      processRunner: okRunner,
+    });
+
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          effectiveConfigPath: globalConfigPath,
+          leafModel: "not-exact",
+          source: "global",
+        }),
+        message: expect.stringContaining("not-exact"),
+        name: "leaf_model",
+        status: "warn",
+      }),
+    );
+  });
+
+  it("includes effective project config source metadata on not-found registry errors", async () => {
+    const root = await tempDir();
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(projectConfigPath, '[leaf]\nmodel = "project/not-found"\n', "utf-8");
+
+    const report = await runLambdaRlmDoctor({
+      cwd: root,
+      mockBridgeRunner: () => ({ ok: true, message: "mock bridge ok" }),
+      modelRegistry: {
+        find: () => null,
+        hasConfiguredAuth: () => true,
+      },
+      processRunner: okRunner,
+      projectConfigPath,
+    });
+
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          effectiveConfigPath: projectConfigPath,
+          leafModel: "project/not-found",
+          source: "project",
+        }),
+        message: expect.stringContaining("not found"),
+        name: "leaf_model",
+        status: "error",
+      }),
+    );
+  });
+
+  it("points non-interactive remediation at the project config that owns a bad registry model", async () => {
+    const root = await tempDir();
+    const globalConfigPath = join(root, "home", ".pi", "lambda-rlm", "config.toml");
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(join(root, "home", ".pi", "lambda-rlm"), { recursive: true });
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(globalConfigPath, '[leaf]\nmodel = "global/good"\n', "utf-8");
+    await writeFile(projectConfigPath, '[leaf]\nmodel = "project/missing-auth"\n', "utf-8");
+
+    const report = await runLambdaRlmDoctor({
+      cwd: root,
+      globalConfigPath,
+      mockBridgeRunner: () => ({ ok: true, message: "mock bridge ok" }),
+      modelRegistry: {
+        find: () => ({ id: "missing-auth" }),
+        hasConfiguredAuth: () => false,
+      },
+      processRunner: okRunner,
+      projectConfigPath,
+    });
+    const leafModel = report.checks.find((entry) => entry.name === "leaf_model");
+    expect(leafModel).toMatchObject({
+      details: expect.objectContaining({
+        effectiveConfigPath: projectConfigPath,
+        leafModel: "project/missing-auth",
+        source: "project",
+      }),
+      status: "error",
+    });
+
+    const output = renderDoctorCommandOutput(report, { interactive: false });
+
+    expect(output).toContain(projectConfigPath);
+    expect(output).toContain("Project config overrides global config for this model selection.");
+    expect(output).not.toContain("Edit ~/.pi/lambda-rlm/config.toml");
+  });
+
   it("reports mock bridge/tool success without real model credentials and verifies Formal Leaf command shape", async () => {
     const root = await tempDir();
     const projectConfigPath = await writeLeafConfig(root);

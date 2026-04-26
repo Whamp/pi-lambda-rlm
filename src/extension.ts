@@ -2,6 +2,7 @@ import { dirname, join } from "node:path";
 import { Type } from "typebox";
 import { executeLambdaRlmTool, LambdaRlmValidationError } from "./lambda-rlm-tool.js";
 import { buildDoctorActionMenu, renderDoctorCommandOutput, runLambdaRlmDoctor } from "./doctor.js";
+import { resolveLambdaRlmConfigWithSources } from "./config-resolver.js";
 import type { DoctorOptions } from "./doctor.js";
 import { writeFormalLeafModelSelection } from "./targeted-config-edit.js";
 import { ensureLambdaRlmUserWorkspace } from "./workspace-scaffolding.js";
@@ -133,6 +134,48 @@ function defaultGlobalConfigPath() {
   return join(process.env.HOME ?? ".", ".pi", "lambda-rlm", "config.toml");
 }
 
+function defaultProjectConfigPath(cwd: string) {
+  return join(cwd, ".pi", "lambda-rlm", "config.toml");
+}
+
+type ConfigWriteTarget = "global" | "project";
+
+async function selectModelWriteTarget(args: {
+  ctx: MinimalCommandContext;
+  doctorOptions: DoctorOptions;
+  globalConfigPath: string;
+  projectConfigPath: string;
+}): Promise<ConfigWriteTarget | undefined> {
+  const targetState = await resolveLambdaRlmConfigWithSources(args);
+  if (!targetState.ok) {
+    return;
+  }
+  const projectConfigExists =
+    targetState.config.sources.exists.project && args.projectConfigPath !== args.globalConfigPath;
+  if (!projectConfigExists) {
+    return "global";
+  }
+  const highlightedTarget =
+    targetState.config.sources.leaf.model === "project" ? "project" : "global";
+  return args.ctx.ui?.select?.(
+    "Choose the Configuration Write Target for Formal Leaf Model Selection.",
+    [
+      {
+        id: "global",
+        label: "Global Tool Configuration",
+        description: "Write ~/.pi/lambda-rlm/config.toml; project-local config remains unchanged.",
+      },
+      {
+        id: "project",
+        label: "Project Tool Configuration",
+        description:
+          "Write this project's .pi/lambda-rlm/config.toml inside the Project Trust Boundary; global config remains unchanged.",
+      },
+    ],
+    highlightedTarget,
+  ) as Promise<ConfigWriteTarget>;
+}
+
 async function maybeRunInteractiveModelSelection(args: {
   ctx: MinimalCommandContext;
   doctorOptions: DoctorOptions;
@@ -177,23 +220,37 @@ async function maybeRunInteractiveModelSelection(args: {
     return;
   }
 
-  const writeTarget =
+  const globalConfigPath =
     globalConfigPathForWorkspace(args.piWorkspacePath) ?? defaultGlobalConfigPath();
+  const projectConfigPath = defaultProjectConfigPath(args.ctx.cwd ?? process.cwd());
+  const selectedTarget = await selectModelWriteTarget({
+    ctx: args.ctx,
+    doctorOptions: args.doctorOptions,
+    globalConfigPath,
+    projectConfigPath,
+  });
+  if (!selectedTarget) {
+    return;
+  }
+  const writeTarget = selectedTarget === "project" ? projectConfigPath : globalConfigPath;
   const modelWrite = await writeFormalLeafModelSelection({ configPath: writeTarget, model });
+  const targetLabel =
+    selectedTarget === "project" ? "Project Tool Configuration" : "Global Tool Configuration";
   const rerun = await runLambdaRlmDoctor({
     ...args.doctorOptions,
-    globalConfigPath: writeTarget,
-    workspacePath: args.piWorkspacePath ?? dirname(writeTarget),
+    globalConfigPath,
+    projectConfigPath,
+    workspacePath: args.piWorkspacePath ?? dirname(globalConfigPath),
   });
   const rerunText = renderDoctorCommandOutput(rerun, { interactive: true });
-  const combinedText = `${args.initialText}\n\nFormal Leaf Model Selection wrote ${modelWrite.model} to Global Tool Configuration (${modelWrite.configPath}) using a Targeted Config Edit (${modelWrite.kind}).\n\nDiagnostics after Formal Leaf Model Selection write:\n${rerunText}`;
+  const combinedText = `${args.initialText}\n\nFormal Leaf Model Selection wrote ${modelWrite.model} to ${targetLabel} (${modelWrite.configPath}) using a Targeted Config Edit (${modelWrite.kind}).\n\nDiagnostics after Formal Leaf Model Selection write:\n${rerunText}`;
   await args.ctx.ui.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
   return {
     content: [{ text: combinedText, type: "text" }],
     details: {
       ...args.report,
       actions: args.menu,
-      modelWrite: { ...modelWrite, target: "global" },
+      modelWrite: { ...modelWrite, target: selectedTarget },
       rerun,
     },
   };

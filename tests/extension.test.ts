@@ -505,6 +505,7 @@ describe("lambda_rlm Pi extension registration", () => {
     });
 
     const text = firstContentText(result);
+    expect(selections).toHaveLength(1);
     expect(selections[0]).toContain("select_formal_leaf_model");
     expect(prompts[0]).toMatch(/manual Formal Leaf model/i);
     await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
@@ -518,6 +519,77 @@ describe("lambda_rlm Pi extension registration", () => {
       modelWrite: { model: "local/qwen", target: "global" },
       rerun: { ok: true },
     });
+  });
+
+  it("prompts for a Configuration Write Target when project config exists and defaults to project-local when it owns the effective model", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-project-target-"));
+    const workspacePath = join(root, "home", ".pi", "lambda-rlm");
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(workspacePath, { recursive: true });
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(join(workspacePath, "config.toml"), '[leaf]\nmodel = "global/old"\n', "utf-8");
+    await writeFile(projectConfigPath, '[leaf]\nmodel = "project/old"\n', "utf-8");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        promptText: () => "project/new",
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return selections.length === 1 ? "select_formal_leaf_model" : "project";
+        },
+      },
+    });
+
+    expect(selections[1]).toContain("Configuration Write Target");
+    expect(selections[1]).toContain(":project:");
+    expect(selections[1]).toContain("global,project");
+    await expect(readFile(projectConfigPath, "utf-8")).resolves.toContain('model = "project/new"');
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'model = "global/old"',
+    );
+    expect(firstContentText(result)).toContain("Project Tool Configuration");
+    expect(result.details).toMatchObject({ modelWrite: { target: "project" } });
+  });
+
+  it("keeps project-local available but defaults the Configuration Write Target to global when project config does not own the effective model", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-global-target-"));
+    const workspacePath = join(root, "home", ".pi", "lambda-rlm");
+    const projectConfigPath = join(root, ".pi", "lambda-rlm", "config.toml");
+    await mkdir(workspacePath, { recursive: true });
+    await mkdir(join(root, ".pi", "lambda-rlm"), { recursive: true });
+    await writeFile(join(workspacePath, "config.toml"), '[leaf]\nmodel = "global/old"\n', "utf-8");
+    await writeFile(projectConfigPath, "[run]\nmax_model_calls = 99\n", "utf-8");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const selections: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        promptText: () => "global/new",
+        select: (prompt, choices, defaultChoiceId) => {
+          selections.push(
+            `${prompt}:${defaultChoiceId}:${choices.map((choice) => choice.id).join(",")}`,
+          );
+          return selections.length === 1 ? "select_formal_leaf_model" : "global";
+        },
+      },
+    });
+
+    expect(selections[1]).toContain(":global:");
+    expect(selections[1]).toContain("global,project");
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toContain(
+      'model = "global/new"',
+    );
+    await expect(readFile(projectConfigPath, "utf-8")).resolves.toContain("max_model_calls = 99");
+    await expect(readFile(projectConfigPath, "utf-8")).resolves.not.toContain("global/new");
+    expect(result.details).toMatchObject({ modelWrite: { target: "global" } });
   });
 
   it("blocks interactive Formal Leaf model edits when the initial doctor report has invalid config", async () => {

@@ -7,7 +7,8 @@ import {
 } from "./leaf-runner.js";
 import type { Awaitable, ProcessRunner } from "./leaf-runner.js";
 import { resolvePromptBundle } from "./prompt-resolver.js";
-import { resolveLambdaRlmConfig } from "./config-resolver.js";
+import { resolveLambdaRlmConfig, resolveLambdaRlmConfigWithSources } from "./config-resolver.js";
+import type { ConfigSource, LambdaRlmConfigSourceReport } from "./config-resolver.js";
 import { runSyntheticBridge } from "./bridge-runner.js";
 import { ensureLambdaRlmUserWorkspace } from "./workspace-scaffolding.js";
 
@@ -303,7 +304,42 @@ function splitProviderModel(modelPattern: string) {
   return { modelId: modelPattern.slice(slash + 1), provider: modelPattern.slice(0, slash) };
 }
 
-function registryModelCheck(modelPattern: string, modelRegistry: MinimalModelRegistry | undefined) {
+function configSourceLabel(source: string) {
+  if (source === "project") {
+    return "Project Tool Configuration";
+  }
+  if (source === "global") {
+    return "Global Tool Configuration";
+  }
+  return "built-in defaults";
+}
+
+function effectiveLeafSourceDetails(sources: LambdaRlmConfigSourceReport) {
+  const source = sources.leaf.model;
+  let effectiveConfigPath: string | undefined;
+  if (source === "global") {
+    effectiveConfigPath = sources.paths.global;
+  } else if (source === "project") {
+    effectiveConfigPath = sources.paths.project;
+  }
+  return {
+    ...(effectiveConfigPath ? { effectiveConfigPath } : {}),
+    paths: sources.paths,
+    source,
+    sourceLabel: configSourceLabel(source),
+  } satisfies Record<string, unknown> & { source: ConfigSource; sourceLabel: string };
+}
+
+function registryModelCheck(
+  modelPattern: string,
+  modelRegistry: MinimalModelRegistry | undefined,
+  sources: LambdaRlmConfigSourceReport,
+) {
+  const sourceDetails = effectiveLeafSourceDetails(sources);
+  const sourceRemediationPrefix = sourceDetails.effectiveConfigPath
+    ? `Effective Formal Leaf Model Selection comes from ${sourceDetails.sourceLabel} (${sourceDetails.effectiveConfigPath}). ${sourceDetails.source === "project" ? "Project config overrides global config for this model selection. " : ""}`
+    : "";
+
   if (!modelRegistry?.find || !modelRegistry.hasConfiguredAuth) {
     return;
   }
@@ -313,8 +349,8 @@ function registryModelCheck(modelPattern: string, modelRegistry: MinimalModelReg
       "leaf_model",
       "warn",
       `Formal Leaf model is configured as ${modelPattern}, but doctor can only verify exact <provider>/<model-id> patterns against Pi's model registry.`,
-      { leafModel: modelPattern, source: "config" },
-      "Prefer an exact provider/model-id accepted by `pi --model`, then rerun /lambda-rlm-doctor.",
+      { leafModel: modelPattern, ...sourceDetails },
+      `${sourceRemediationPrefix}Prefer an exact provider/model-id accepted by \`pi --model\`, then rerun /lambda-rlm-doctor.`,
     );
   }
   const findModel = modelRegistry.find.bind(modelRegistry);
@@ -324,8 +360,13 @@ function registryModelCheck(modelPattern: string, modelRegistry: MinimalModelReg
       "leaf_model",
       "error",
       `Configured Formal Leaf model ${modelPattern} was not found in Pi's model registry.`,
-      { leafModel: modelPattern, provider: parsed.provider, modelId: parsed.modelId },
-      "Pick a model shown by `/model` or `pi --list-models`, or add the provider/model to ~/.pi/agent/models.json.",
+      {
+        leafModel: modelPattern,
+        modelId: parsed.modelId,
+        provider: parsed.provider,
+        ...sourceDetails,
+      },
+      `${sourceRemediationPrefix}Pick a model shown by \`/model\` or \`pi --list-models\`, or add the provider/model to ~/.pi/agent/models.json.`,
     );
   }
   if (!modelRegistry.hasConfiguredAuth(model)) {
@@ -333,14 +374,24 @@ function registryModelCheck(modelPattern: string, modelRegistry: MinimalModelReg
       "leaf_model",
       "error",
       `Configured Formal Leaf model ${modelPattern} exists, but Pi does not have credentials for it.`,
-      { leafModel: modelPattern, provider: parsed.provider, modelId: parsed.modelId },
-      "Run `/login`, set the provider API key, or update ~/.pi/agent/auth.json before using lambda_rlm.",
+      {
+        leafModel: modelPattern,
+        modelId: parsed.modelId,
+        provider: parsed.provider,
+        ...sourceDetails,
+      },
+      `${sourceRemediationPrefix}Run \`/login\`, set the provider API key, or update ~/.pi/agent/auth.json before using lambda_rlm.`,
     );
   }
 }
 
 async function leafModelCheck(options: DoctorOptions, cwd: string) {
-  const configResult = await resolvedConfigForDoctor(options, cwd);
+  const configResult = await resolveLambdaRlmConfigWithSources({
+    cwd,
+    ...(options.homeDir ? { homeDir: options.homeDir } : {}),
+    ...(options.globalConfigPath ? { globalConfigPath: options.globalConfigPath } : {}),
+    ...(options.projectConfigPath ? { projectConfigPath: options.projectConfigPath } : {}),
+  });
   if (!configResult.ok) {
     return check(
       "leaf_model",
@@ -350,16 +401,28 @@ async function leafModelCheck(options: DoctorOptions, cwd: string) {
       "Fix ~/.pi/lambda-rlm/config.toml or <project>/.pi/lambda-rlm/config.toml, then rerun /lambda-rlm-doctor.",
     );
   }
-  const configuredModel = configResult.config.leaf.model;
+  const configuredModel = configResult.config.config.leaf.model;
   if (configuredModel) {
-    const registryCheck = registryModelCheck(configuredModel, options.modelRegistry);
+    const registryCheck = registryModelCheck(
+      configuredModel,
+      options.modelRegistry,
+      configResult.config.sources,
+    );
     if (registryCheck) {
       return registryCheck;
     }
-    return check("leaf_model", "ok", `Formal Leaf model is configured: ${configuredModel}.`, {
-      leafModel: configuredModel,
-      source: "config",
-    });
+    const source = configResult.config.sources.leaf.model;
+    const sourceLabel = configSourceLabel(source);
+    return check(
+      "leaf_model",
+      "ok",
+      `Formal Leaf model is configured: ${configuredModel}. Effective Formal Leaf Model Selection comes from ${sourceLabel}.`,
+      {
+        leafModel: configuredModel,
+        paths: configResult.config.sources.paths,
+        source,
+      },
+    );
   }
 
   const envModel = envLeafModel(options);
@@ -543,9 +606,19 @@ function manualRemediationSnippets(report: DoctorReport) {
   const snippets: string[] = [];
   const leafModel = report.checks.find((entry) => entry.name === "leaf_model");
   if (leafModel?.status !== "ok") {
+    const details = leafModel?.details ?? {};
+    const effectiveConfigPath =
+      typeof details.effectiveConfigPath === "string" ? details.effectiveConfigPath : undefined;
+    const source = typeof details.source === "string" ? details.source : undefined;
+    const editTarget = effectiveConfigPath ?? "~/.pi/lambda-rlm/config.toml";
+    const ownershipNote = effectiveConfigPath
+      ? `Effective Formal Leaf Model Selection comes from ${configSourceLabel(source ?? "default")} at ${effectiveConfigPath}.${source === "project" ? " Project config overrides global config for this model selection." : ""}`
+      : "No effective config source path was available; if a project config sets [leaf].model, it overrides global config for this project.";
     snippets.push(`Missing or invalid Formal Leaf model:
 
-Edit ~/.pi/lambda-rlm/config.toml:
+${ownershipNote}
+
+Edit ${editTarget}:
 
 \`\`\`toml
 [leaf]

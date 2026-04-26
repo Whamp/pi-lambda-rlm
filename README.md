@@ -60,9 +60,11 @@ pi_executable = "pi"
 
 ### 3. Configure the Formal Leaf model
 
-`lambda_rlm` services Lambda-RLM model callbacks by spawning constrained child Pi processes. Those child calls need an explicit Pi model. In interactive Pi sessions, run `/lambda-rlm-doctor`: after diagnostics, its Doctor Repair Flow can offer Formal Leaf Model Selection and prompt for a manual `provider/model-id` value to write into the global config with a targeted TOML edit.
+`lambda_rlm` services Lambda-RLM model callbacks by spawning constrained child Pi processes. Those child calls need an explicit Pi model. In interactive Pi sessions, run `/lambda-rlm-doctor`: after diagnostics, its Doctor Repair Flow can offer Formal Leaf Model Selection and prompt for a manual `provider/model-id` value.
 
-Manual editing remains the fallback for non-interactive or diagnostic-only contexts. Add `[leaf].model` to `~/.pi/lambda-rlm/config.toml` using a model that already works in Pi:
+Write target behavior follows config precedence. If no distinct project `.pi/lambda-rlm/config.toml` exists, Formal Leaf Model Selection writes the global config at `~/.pi/lambda-rlm/config.toml` without asking for a target. If a project config exists, doctor prompts for Global Tool Configuration versus Project Tool Configuration. The highlighted default matches the effective owner of `[leaf].model`: project-local is highlighted when project config owns the effective model, otherwise global is highlighted while project-local remains available.
+
+Manual editing remains the fallback for non-interactive or diagnostic-only contexts. Add `[leaf].model` to the effective config file doctor reports, or to `~/.pi/lambda-rlm/config.toml` for global setup, using a model that already works in Pi:
 
 ```toml
 [leaf]
@@ -130,7 +132,7 @@ The doctor defensively reruns Workspace Scaffolding to restore missing onboardin
 - prompt overlays;
 - a deterministic mock bridge run that does not spend model credits.
 
-In interactive sessions, the doctor shows a post-diagnostics action menu. Formal Leaf Model Selection can prompt for a manual model pattern and update the global config after diagnostics. If the doctor reports invalid TOML/configuration, fix that file first; the model action will not rewrite invalid config. If the doctor reports a `leaf_model` error, use the model action or manually fix `[leaf].model`, Pi credentials, or `~/.pi/agent/models.json`, then rerun it.
+In interactive sessions, the doctor shows a post-diagnostics action menu. Formal Leaf Model Selection can prompt for a manual model pattern and update the selected config after diagnostics. With no project config, it defaults to the global config without asking. When project config exists, it asks for a write target and highlights project-local when that project config owns the effective model. If the doctor reports invalid TOML/configuration, fix that file first; the model action will not rewrite invalid config. If the doctor reports a `leaf_model` error, use the model action or manually fix `[leaf].model`, Pi credentials, or `~/.pi/agent/models.json`, then rerun it.
 
 ### 6. Use it naturally
 
@@ -226,7 +228,7 @@ Configuration resolves as sparse overlays in this order:
 3. project config at `<cwd>/.pi/lambda-rlm/config.toml`;
 4. per-run tightening from the tool call for supported `[run]` limits only.
 
-Project configuration is inside the project trust boundary, so it may override global defaults for that project.
+Project configuration is inside the project trust boundary, so it may override global defaults for that project. When `cwd` is the home directory and the global and project paths are the same `~/.pi/lambda-rlm/config.toml`, that file is treated as Global Tool Configuration only.
 
 ### `[leaf]` keys
 
