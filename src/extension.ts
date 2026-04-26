@@ -152,6 +152,24 @@ async function maybeRunInteractiveModelSelection(args: {
   if (selectedAction !== "select_formal_leaf_model") {
     return;
   }
+  const initialConfigError = args.report.checks.find(
+    (check) => check.name === "config" && check.status === "error",
+  );
+  if (initialConfigError) {
+    const combinedText = `${args.initialText}\n\nFormal Leaf Model Selection was not started because initial diagnostics reported invalid Lambda-RLM configuration. Fix the TOML/config error first, then rerun /lambda-rlm-doctor.`;
+    await args.ctx.ui.notify?.(combinedText.split("\n", 1)[0] ?? combinedText);
+    return {
+      content: [{ text: combinedText, type: "text" }],
+      details: {
+        ...args.report,
+        actions: args.menu,
+        blockedAction: {
+          id: "select_formal_leaf_model",
+          reason: "initial_config_error",
+        },
+      },
+    };
+  }
   const model = await args.ctx.ui.promptText(
     "Enter a manual Formal Leaf model pattern for Formal Leaf Model Selection (for example provider/model-id).",
   );

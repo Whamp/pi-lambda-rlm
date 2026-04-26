@@ -116,6 +116,9 @@ function editFormalLeafModel(text: string, model: string) {
   while (insertAt > leafTable.start + 1 && /^\s*$/.test(lines[insertAt - 1] ?? "")) {
     insertAt -= 1;
   }
+  if (insertAt > 0 && lineEnding(lines[insertAt - 1] ?? "") === "") {
+    lines[insertAt - 1] = `${lines[insertAt - 1] ?? ""}\n`;
+  }
   lines.splice(insertAt, 0, `model = ${quoteTomlString(model)}\n`);
   return { kind: "appended_to_existing_leaf_table" as const, text: lines.join("") };
 }

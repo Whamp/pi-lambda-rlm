@@ -520,6 +520,43 @@ describe("lambda_rlm Pi extension registration", () => {
     });
   });
 
+  it("blocks interactive Formal Leaf model edits when the initial doctor report has invalid config", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lambda-rlm-extension-invalid-config-flow-"));
+    const workspacePath = join(root, ".pi", "lambda-rlm");
+    const command = registeredLambdaRlmCommand(registerLambdaRlmExtension, { workspacePath });
+    const invalidConfig = `[leaf]\nmodel = `;
+    await writeFile(join(workspacePath, "config.toml"), invalidConfig, "utf-8");
+    const prompts: string[] = [];
+
+    const result = await command.options.handler({
+      cwd: root,
+      leafProcessRunner: okDoctorRunner,
+      ui: {
+        promptText: (prompt) => {
+          prompts.push(prompt);
+          return "local/qwen";
+        },
+        select: () => "select_formal_leaf_model",
+      },
+    });
+
+    const text = firstContentText(result);
+    expect(text).toContain("Formal Leaf Model Selection was not started");
+    expect(text).toContain("initial diagnostics reported invalid Lambda-RLM configuration");
+    expect(prompts).toStrictEqual([]);
+    await expect(readFile(join(workspacePath, "config.toml"), "utf-8")).resolves.toBe(
+      invalidConfig,
+    );
+    expect(result.details).toMatchObject({
+      blockedAction: {
+        id: "select_formal_leaf_model",
+        reason: "initial_config_error",
+      },
+    });
+    expect(result.details).not.toHaveProperty("modelWrite");
+    expect(result.details).not.toHaveProperty("rerun");
+  });
+
   it("loads the Pi extension entrypoint and registers the lambda_rlm tool", () => {
     const tool = registeredLambdaRlmTool(registerLambdaRlmEntrypoint);
 

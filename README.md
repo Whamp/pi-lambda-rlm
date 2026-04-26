@@ -2,7 +2,7 @@
 
 `lambda_rlm` is an **agent-invoked Pi tool** for asking questions over files that are too large, too numerous, or too awkward to paste into the parent agent conversation.
 
-Beginner version: install the Pi package, restart or `/reload` Pi so extension load creates the **Lambda-RLM User Workspace** at `~/.pi/lambda-rlm/`, add `[leaf].model` manually using a model that already works in Pi, run `/lambda-rlm-doctor` to validate setup, then ask Pi a question that references one or more file paths. The agent decides when calling `lambda_rlm` is better than reading those files directly.
+Beginner version: install the Pi package, restart or `/reload` Pi so extension load creates the **Lambda-RLM User Workspace** at `~/.pi/lambda-rlm/`, run interactive `/lambda-rlm-doctor` to validate setup and optionally enter a Formal Leaf model after diagnostics, then ask Pi a question that references one or more file paths. Manual `[leaf].model` TOML editing remains the fallback for non-interactive or diagnostic-only contexts. The agent decides when calling `lambda_rlm` is better than reading those files directly.
 
 It is **not a provider or benchmark harness**. It is also not something most users call by hand. It is a Pi extension tool that protects the parent agent context budget by doing long-context file work behind a tool boundary.
 
@@ -58,9 +58,11 @@ pi_executable = "pi"
 # model_process_concurrency = 2
 ```
 
-### 3. Configure the Formal Leaf model manually
+### 3. Configure the Formal Leaf model
 
-`lambda_rlm` services Lambda-RLM model callbacks by spawning constrained child Pi processes. Those child calls need an explicit Pi model. Add `[leaf].model` to `~/.pi/lambda-rlm/config.toml` manually using a model that already works in Pi:
+`lambda_rlm` services Lambda-RLM model callbacks by spawning constrained child Pi processes. Those child calls need an explicit Pi model. In interactive Pi sessions, run `/lambda-rlm-doctor`: after diagnostics, its Doctor Repair Flow can offer Formal Leaf Model Selection and prompt for a manual `provider/model-id` value to write into the global config with a targeted TOML edit.
+
+Manual editing remains the fallback for non-interactive or diagnostic-only contexts. Add `[leaf].model` to `~/.pi/lambda-rlm/config.toml` using a model that already works in Pi:
 
 ```toml
 [leaf]
@@ -128,7 +130,7 @@ The doctor defensively reruns Workspace Scaffolding to restore missing onboardin
 - prompt overlays;
 - a deterministic mock bridge run that does not spend model credits.
 
-If the doctor reports a `leaf_model` error, fix `[leaf].model`, Pi credentials, or `~/.pi/agent/models.json`, then rerun it.
+In interactive sessions, the doctor shows a post-diagnostics action menu. Formal Leaf Model Selection can prompt for a manual model pattern and update the global config after diagnostics. If the doctor reports invalid TOML/configuration, fix that file first; the model action will not rewrite invalid config. If the doctor reports a `leaf_model` error, use the model action or manually fix `[leaf].model`, Pi credentials, or `~/.pi/agent/models.json`, then rerun it.
 
 ### 6. Use it naturally
 

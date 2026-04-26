@@ -53,6 +53,39 @@ describe("Targeted Config Edit for Formal Leaf Model Selection", () => {
     expect(result.kind).toBe("appended_to_existing_leaf_table");
   });
 
+  it("appends a missing model on a new line when an existing leaf table has no trailing newline", async () => {
+    const configPath = await tempConfig(`[leaf]`);
+
+    const result = await writeFormalLeafModelSelection({ configPath, model: "anthropic/claude" });
+
+    await expect(readFile(configPath, "utf-8")).resolves.toBe(
+      `[leaf]\nmodel = "anthropic/claude"\n`,
+    );
+    expect(result.kind).toBe("appended_to_existing_leaf_table");
+  });
+
+  it("appends a missing model after existing leaf settings with no trailing newline", async () => {
+    const configPath = await tempConfig(`[leaf]\nthinking = "off"`);
+
+    const result = await writeFormalLeafModelSelection({ configPath, model: "anthropic/claude" });
+
+    await expect(readFile(configPath, "utf-8")).resolves.toBe(
+      `[leaf]\nthinking = "off"\nmodel = "anthropic/claude"\n`,
+    );
+    expect(result.kind).toBe("appended_to_existing_leaf_table");
+  });
+
+  it("preserves existing trailing-newline behavior when appending a missing model", async () => {
+    const configPath = await tempConfig(`[leaf]\nthinking = "off"\n`);
+
+    const result = await writeFormalLeafModelSelection({ configPath, model: "anthropic/claude" });
+
+    await expect(readFile(configPath, "utf-8")).resolves.toBe(
+      `[leaf]\nthinking = "off"\nmodel = "anthropic/claude"\n`,
+    );
+    expect(result.kind).toBe("appended_to_existing_leaf_table");
+  });
+
   it("adds a leaf table when no leaf table exists and creates missing global config files", async () => {
     const root = await mkdtemp(join(tmpdir(), "lambda-rlm-targeted-global-"));
     const configPath = join(root, ".pi", "lambda-rlm", "config.toml");
