@@ -638,7 +638,7 @@ export default function registerLambdaRlmExtension(pi: MinimalPiApi) {
     );
     if (scaffold.createdWorkspace) {
       void pi.ui?.notify?.(
-        "Lambda-RLM User Workspace created. Add [leaf].model manually, then run /lambda-rlm-doctor to validate setup.",
+        "Lambda-RLM User Workspace created. Run /lambda-rlm-doctor for setup diagnostics and Formal Leaf Model Selection.",
       );
     }
   }
